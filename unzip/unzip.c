@@ -486,8 +486,7 @@ int MAIN(int argc, char* argv[]) /* return PK-type error code (except under VMS)
 /*  Primary UnZip entry point  */
 /*******************************/
 
-int unzip(__GPRO__ int argc, char** argv)
-{
+int unzip(__GPRO__ int argc, char** argv) {
 #ifndef NO_ZIPINFO
     char* p;
 #endif
@@ -960,8 +959,7 @@ cleanup_and_exit:
 /* Function setsignalhandler() */
 /*******************************/
 
-static int setsignalhandler(__GPRO__ savsigs_info** p_savedhandler_chain, int signal_type, void (*newhandler)(int))
-{
+static int setsignalhandler(__GPRO__ savsigs_info** p_savedhandler_chain, int signal_type, void (*newhandler)(int)) {
     savsigs_info* savsig;
 
     savsig = malloc(sizeof(savsigs_info));
@@ -989,8 +987,7 @@ static int setsignalhandler(__GPRO__ savsigs_info** p_savedhandler_chain, int si
 /* Function uz_opts() */
 /**********************/
 
-int uz_opts(__GPRO__ int* pargc, char*** pargv)
-{
+int uz_opts(__GPRO__ int* pargc, char*** pargv) {
     char **argv, *s;
     int argc, c, error = FALSE, negative = 0, showhelp = 0;
 

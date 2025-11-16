@@ -833,13 +833,11 @@ static int do_seekable(__GPRO__ int lastchance) /* return PK-type error code */
    The file has to be opened previously
 */
 #ifdef USE_STRM_INPUT
-static zoff_t file_size(FILE* file)
-{
+static zoff_t file_size(FILE* file) {
     int sts;
     size_t siz;
 #else  /* !USE_STRM_INPUT */
-static zoff_t file_size(int fh)
-{
+static zoff_t file_size(int fh) {
     int siz;
 #endif /* ?USE_STRM_INPUT */
     zoff_t ofs;
@@ -1576,8 +1574,7 @@ int process_local_file_hdr(__G) /* return PK-type error code */
 /* Function getZip64Data() */
 /*******************************/
 
-int getZip64Data(__GPRO__ ZCONST uch* ef_buf, unsigned ef_len)
-{
+int getZip64Data(__GPRO__ ZCONST uch* ef_buf, unsigned ef_len) {
     unsigned eb_id;
     unsigned eb_len;
 
@@ -2342,8 +2339,7 @@ ulg* p_uidgid;      /* return storage: uid or gid value */
 /* Function ef_scan_for_izux() */
 /*******************************/
 
-unsigned ef_scan_for_izux(ZCONST uch* ef_buf, unsigned ef_len, int ef_is_c, ulg dos_mdatetime, iztimes* z_utim, ulg* z_uidgid)
-{
+unsigned ef_scan_for_izux(ZCONST uch* ef_buf, unsigned ef_len, int ef_is_c, ulg dos_mdatetime, iztimes* z_utim, ulg* z_uidgid) {
     unsigned flags = 0;
     unsigned eb_id;
     unsigned eb_len;

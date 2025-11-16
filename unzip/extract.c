@@ -130,11 +130,11 @@ static ZCONST char Far LvsCFNamMsg[] =
          continuing with \"central\" filename version\n";
 #endif /* !SFX */
 #if (!defined(SFX) && defined(UNICODE_SUPPORT))
-#  if defined(__GNUC__)
+#if defined(__GNUC__)
 static ZCONST char Far GP11FlagsDiffer[] __attribute__((unused)) =
-#  else
+#else
 static ZCONST char Far GP11FlagsDiffer[] =
-#  endif
+#endif
     "file #%lu (%s):\n\
          mismatch between local and central GPF bit 11 (\"UTF-8\"),\n\
          continuing with central flag (IsUTF8 = %d)\n";

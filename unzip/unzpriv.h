@@ -104,7 +104,6 @@
 #define NO_STDDEF_H
 #endif
 
-
 #ifdef realix /* Modcomp Real/IX, real-time SysV.3 variant */
 #define SYSV
 #define NO_UID_GID /* no uid_t/gid_t */
@@ -202,21 +201,17 @@
     Acorn RISCOS section:
   ---------------------------------------------------------------------------*/
 
-
 /*---------------------------------------------------------------------------
     Amiga section:
   ---------------------------------------------------------------------------*/
-
 
 /*---------------------------------------------------------------------------
     AOS/VS section (somewhat similar to Unix, apparently):
   ---------------------------------------------------------------------------*/
 
-
 /*---------------------------------------------------------------------------
     Atari ST section:
   ---------------------------------------------------------------------------*/
-
 
 /*---------------------------------------------------------------------------
     AtheOS section:
@@ -229,7 +224,6 @@
 /*---------------------------------------------------------------------------
     BeOS section:
   ---------------------------------------------------------------------------*/
-
 
 /*---------------------------------------------------------------------------
     Human68k/X680x0 section:
@@ -277,11 +271,9 @@
     Mac section:
   ---------------------------------------------------------------------------*/
 
-
 /*---------------------------------------------------------------------------
     MS-DOS, OS/2, FLEXOS section:
   ---------------------------------------------------------------------------*/
-
 
 #if (defined(_MSC_VER) || (defined(M_I86) && !defined(__WATCOMC__)))
 #ifndef MSC
@@ -339,7 +331,6 @@
     MTS section (piggybacks UNIX, I think):
   ---------------------------------------------------------------------------*/
 
-
 /*---------------------------------------------------------------------------
    Novell Netware NLM section
  ---------------------------------------------------------------------------*/
@@ -352,11 +343,9 @@
    QDOS section
  ---------------------------------------------------------------------------*/
 
-
 /*---------------------------------------------------------------------------
     Tandem NSK section:
   ---------------------------------------------------------------------------*/
-
 
 /*---------------------------------------------------------------------------
     THEOS section:
@@ -417,11 +406,9 @@ extern long lseek(), dup(), creat();
     VMS section:
   ---------------------------------------------------------------------------*/
 
-
 /*---------------------------------------------------------------------------
     Win32 (Windows 95/NT) section:
   ---------------------------------------------------------------------------*/
-
 
 /*---------------------------------------------------------------------------
     Win32 Windows CE section (also POCKET_UNZIP)
@@ -491,9 +478,9 @@ typedef struct stat z_stat;
 #include <stdlib.h> /* standard library prototypes, malloc(), etc. */
 #endif
 typedef size_t extent;
-#else          /* !MODERN */
+#else       /* !MODERN */
 Z_OFF_T lseek();
-#ifdef VAXC    /* not fully modern, but has stdlib.h and void */
+#ifdef VAXC /* not fully modern, but has stdlib.h and void */
 #include <stdlib.h>
 #else
 char* malloc();
@@ -523,9 +510,6 @@ typedef unsigned int extent;
 #endif
 #endif
 #define VMS_UNZIP_VERSION 42 /* if OS-needed-to-extract is VMS:  can do */
-
-
-
 
 #if (defined(DOS_OS2_W32) || defined(__human68k__))
 #define DOS_H68_OS2_W32
@@ -558,7 +542,6 @@ typedef unsigned int extent;
 #if (defined(TOPS20) || defined(VMS))
 #define T20_VMS
 #endif
-
 
 #if (defined(__ATHEOS__) || defined(__BEOS__))
 #define ATH_BEO
@@ -1048,7 +1031,6 @@ char* plastchar OF((ZCONST char* ptr, extent len));
 #endif
 #endif /* MALLOC_WORK && !MY_ZCALLOC */
 
-
 #ifdef ZMEM
 #undef ZMEM
 #define memcmp(b1, b2, len) bcmp(b2, b1, len)
@@ -1116,7 +1098,6 @@ char* plastchar OF((ZCONST char* ptr, extent len));
 
 /* ---------------------------- */
 
-
 /* 64-bit stat functions */
 #define zstat stat
 #define zfstat fstat
@@ -1132,9 +1113,7 @@ char* plastchar OF((ZCONST char* ptr, extent len));
 #define zfopen fopen
 #define zfdopen fdopen
 
-
 /* ---------------------------- */
-
 
 #else
 /* No Large File Support */
@@ -1280,7 +1259,6 @@ char* plastchar OF((ZCONST char* ptr, extent len));
 
 #define IS_OVERWRT_ALL (G.overwrite_mode == OVERWRT_ALWAYS)
 #define IS_OVERWRT_NONE (G.overwrite_mode == OVERWRT_NEVER)
-
 
 #define ROOT 0        /* checkdir() extract-to path:  called once */
 #define INIT 1        /* allocate buildpath:  called once per member */
@@ -1837,7 +1815,6 @@ typedef struct _APIDocStruct {
 /*  Globals  */
 /*************/
 
-
 #include "globals.h"
 
 /*************************/
@@ -2038,16 +2015,13 @@ void APIhelp OF((__GPRO__ int argc, char** argv));
     MSDOS-only functions:
   ---------------------------------------------------------------------------*/
 
-
 /*---------------------------------------------------------------------------
     OS/2-only functions:
   ---------------------------------------------------------------------------*/
 
-
 /*---------------------------------------------------------------------------
     QDOS-only functions:
   ---------------------------------------------------------------------------*/
-
 
 /*---------------------------------------------------------------------------
     TOPS20-only functions:
@@ -2074,11 +2048,9 @@ void close_infile OF((__GPRO));       /* vmmvs.c */
     VMS-only functions:
   ---------------------------------------------------------------------------*/
 
-
 /*---------------------------------------------------------------------------
     WIN32-only functions:
   ---------------------------------------------------------------------------*/
-
 
 /*---------------------------------------------------------------------------
     Miscellaneous/shared functions:
@@ -2096,9 +2068,9 @@ int iswild OF((ZCONST char* p));                                 /* match.c */
 /* declarations of public CRC-32 functions have been moved into crc32.h
    (free_crc_table(), get_crc_table(), crc32())                      crc32.c */
 
-int dateformat OF((void));     /* local */
-char dateseparator OF((void)); /* local */
-void version OF((__GPRO)); /* local */
+int dateformat OF((void));                            /* local */
+char dateseparator OF((void));                        /* local */
+void version OF((__GPRO));                            /* local */
 int mapattr OF((__GPRO));                             /* local */
 int mapname OF((__GPRO__ int renamed));               /* local */
 int checkdir OF((__GPRO__ char* pathcomp, int flag)); /* local */
@@ -2106,8 +2078,8 @@ char* do_wild OF((__GPRO__ ZCONST char* wildzipfn));  /* local */
 char* GetLoadPath OF((__GPRO));                       /* local */
 #if (defined(MORE) && (defined(ATH_BEO_UNX) || defined(QDOS) || defined(VMS)))
 int screensize OF((int* tt_rows, int* tt_cols)); /* local */
-#endif /* MORE && (ATH_BEO_UNX || QDOS || VMS) */
-void close_outfile OF((__GPRO)); /* local */
+#endif                                           /* MORE && (ATH_BEO_UNX || QDOS || VMS) */
+void close_outfile OF((__GPRO));                 /* local */
 #ifdef SET_SYMLINK_ATTRIBS
 int set_symlnk_attribs OF((__GPRO__ slinkentry * slnk_entry)); /* local */
 #endif

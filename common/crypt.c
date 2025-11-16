@@ -243,7 +243,12 @@ FILE* zfile;                                            /* where to write header
     }
 
     /* 3) Write it out. (fix: correct stream variable name) */
+#ifdef ZIP
+    (void)zfile;
+    (void)bfwrite(header, 1, RAND_HEAD_LEN, BFWRITE_DATA);
+#else
     (void)fwrite(header, 1, RAND_HEAD_LEN, zfile);
+#endif
 }
 
 #ifdef UTIL
@@ -416,7 +421,12 @@ FILE* f;          /* file to write to */
         }
     }
     /* Write the buffer out */
-    return fwrite(buf, item_size, nb, f);
+#ifdef ZIP
+    (void)f;
+    return (unsigned)bfwrite(buf, item_size, nb, BFWRITE_DATA);
+#else
+    return (unsigned)fwrite(buf, item_size, nb, f);
+#endif
 }
 
 #endif /* ?UTIL */
