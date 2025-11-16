@@ -9,26 +9,7 @@
   also may be found at:  ftp://ftp.info-zip.org/pub/infozip/license.html
 */
 
-#ifdef NO_LARGE_FILE_SUPPORT
-#ifdef LARGE_FILE_SUPPORT
-#undef LARGE_FILE_SUPPORT
-#endif
-#endif
-
-#ifdef LARGE_FILE_SUPPORT
-/* 64-bit Large File Support */
-
-/* The following Large File Summit (LFS) defines turn on large file support on
-   Linux (probably 2.4 or later kernel) and many other unixen */
-
-#define _LARGEFILE_SOURCE /* some OSes need this for fseeko */
-#define _LARGEFILE64_SOURCE
-#define _FILE_OFFSET_BITS 64 /* select default interface as 64 bit */
-#define _LARGE_FILES         /* some OSes need this for 64-bit off_t */
-#endif
-
-#include <sys/types.h>
-#include <sys/stat.h>
+#include "platform.h"
 
 /* printf format size prefix for zoff_t values */
 #ifdef LARGE_FILE_SUPPORT
@@ -36,19 +17,6 @@
 #else
 #define ZOFF_T_FORMAT_SIZE_PREFIX "l"
 #endif
-
-#ifdef NO_OFF_T
-typedef long zoff_t;
-typedef unsigned long uzoff_t;
-#else
-typedef off_t zoff_t;
-#if defined(LARGE_FILE_SUPPORT) && !(defined(__alpha) && defined(__osf__))
-typedef unsigned long long uzoff_t;
-#else
-typedef unsigned long uzoff_t;
-#endif
-#endif
-typedef struct stat z_stat;
 
 /* Automatically set ZIP64_SUPPORT if LFS */
 
