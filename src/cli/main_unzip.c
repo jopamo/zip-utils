@@ -10,40 +10,38 @@
 #include "ops.h"
 #include "ziputils.h"
 
-static bool argv0_is_zipinfo(const char *argv0) {
-    const char *base = strrchr(argv0, '/');
+static bool argv0_is_zipinfo(const char* argv0) {
+    const char* base = strrchr(argv0, '/');
     base = base ? base + 1 : argv0;
     return strcmp(base, "zipinfo") == 0 || strcmp(base, "ii") == 0;
 }
 
-static void print_usage(FILE *to, const char *argv0) {
-    fprintf(
-        to,
-        "Usage: %s [options] archive.zip [patterns...]\n"
-        "       %s -Z [zipinfo-options] archive.zip [patterns...]\n"
-        "\n"
-        "Modern rewrite: parses legacy-compatible options into a reentrant context.\n"
-        "\n"
-        "Common options:\n"
-        "  -l                    List contents only\n"
-        "  -t                    Test archive integrity (zipinfo: show totals footer)\n"
-        "  -d DIR                Extract into DIR\n"
-        "  -o / -n               Overwrite / never overwrite\n"
-        "  -q / -v               Quiet / verbose output\n"
-        "  -x pattern            Exclude pattern (can repeat)\n"
-        "  -i pattern            Include only matching pattern\n"
-        "  -C                    Case-insensitive pattern matching\n"
-        "  --help, -?            Show this help\n"
-        "\n"
-        "Zipinfo options (-Z or run as \"zipinfo\"):\n"
-        "  -1 / -2               Filenames only (quiet / allow header+totals)\n"
-        "  -s / -m / -l / -v     Short (default) / medium / long listing / verbose\n"
-        "  -h / -t               Force header / totals footer (alone suppress entries)\n"
-        "  -T                    Decimal timestamps (yymmdd.hhmmss)\n"
-        "  -M                    Enable pager prompt (noop placeholder)\n"
-        "  -z                    Include archive comment (ignored)\n",
-        argv0,
-        argv0);
+static void print_usage(FILE* to, const char* argv0) {
+    fprintf(to,
+            "Usage: %s [options] archive.zip [patterns...]\n"
+            "       %s -Z [zipinfo-options] archive.zip [patterns...]\n"
+            "\n"
+            "Modern rewrite: parses legacy-compatible options into a reentrant context.\n"
+            "\n"
+            "Common options:\n"
+            "  -l                    List contents only\n"
+            "  -t                    Test archive integrity (zipinfo: show totals footer)\n"
+            "  -d DIR                Extract into DIR\n"
+            "  -o / -n               Overwrite / never overwrite\n"
+            "  -q / -v               Quiet / verbose output\n"
+            "  -x pattern            Exclude pattern (can repeat)\n"
+            "  -i pattern            Include only matching pattern\n"
+            "  -C                    Case-insensitive pattern matching\n"
+            "  --help, -?            Show this help\n"
+            "\n"
+            "Zipinfo options (-Z or run as \"zipinfo\"):\n"
+            "  -1 / -2               Filenames only (quiet / allow header+totals)\n"
+            "  -s / -m / -l / -v     Short (default) / medium / long listing / verbose\n"
+            "  -h / -t               Force header / totals footer (alone suppress entries)\n"
+            "  -T                    Decimal timestamps (yymmdd.hhmmss)\n"
+            "  -M                    Enable pager prompt (noop placeholder)\n"
+            "  -z                    Include archive comment (ignored)\n",
+            argv0, argv0);
 }
 
 static int map_exit_code(int status) {
@@ -63,37 +61,46 @@ static int map_exit_code(int status) {
     }
 }
 
-static int parse_unzip_args(int argc, char **argv, ZContext *ctx) {
+static int parse_unzip_args(int argc, char** argv, ZContext* ctx) {
     if (argv0_is_zipinfo(argv[0])) {
         ctx->zipinfo_mode = true;
         ctx->list_only = true;
     }
 
     static const struct option long_opts[] = {
-        {"help", no_argument, NULL, '?'},
-        {"list", no_argument, NULL, 'l'},
-        {"test", no_argument, NULL, 't'},
-        {NULL, 0, NULL, 0},
+        {"help", no_argument, NULL, '?'}, {"list", no_argument, NULL, 'l'},           {"pipe", no_argument, NULL, 'p'},
+        {"test", no_argument, NULL, 't'}, {"password", required_argument, NULL, 'P'}, {NULL, 0, NULL, 0},
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "ltd:ovnqvi:x:hCZ12smMvTz?", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "lptd:ovnqvi:x:hCZ12smMvTz?P:", long_opts, NULL)) != -1) {
         switch (opt) {
             case 'l':
                 if (ctx->zipinfo_mode) {
                     ctx->zi_format = ZU_ZI_FMT_LONG;
                     ctx->zi_format_specified = true;
                     ctx->list_only = true;
-                } else {
+                }
+                else {
                     ctx->list_only = true;
                 }
+                break;
+            case 'p':
+                ctx->output_to_stdout = true;
+                break;
+            case 'P':
+                free(ctx->password);
+                ctx->password = strdup(optarg);
+                if (!ctx->password)
+                    return ZU_STATUS_OOM;
                 break;
             case 't':
                 if (ctx->zipinfo_mode) {
                     ctx->zi_footer = true;
                     ctx->zi_footer_explicit = true;
                     ctx->list_only = true;
-                } else {
+                }
+                else {
                     ctx->test_integrity = true;
                 }
                 break;
@@ -168,7 +175,8 @@ static int parse_unzip_args(int argc, char **argv, ZContext *ctx) {
                     ctx->zi_header = true;
                     ctx->zi_header_explicit = true;
                     ctx->list_only = true;
-                } else {
+                }
+                else {
                     print_usage(stdout, argv[0]);
                     return ZU_STATUS_USAGE;
                 }
@@ -230,8 +238,8 @@ static int parse_unzip_args(int argc, char **argv, ZContext *ctx) {
     return ZU_STATUS_OK;
 }
 
-int main(int argc, char **argv) {
-    ZContext *ctx = zu_context_create();
+int main(int argc, char** argv) {
+    ZContext* ctx = zu_context_create();
     if (!ctx) {
         fprintf(stderr, "unzip: failed to allocate context\n");
         return ZU_STATUS_OOM;

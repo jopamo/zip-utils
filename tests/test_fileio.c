@@ -12,8 +12,8 @@
 #include "fileio.h"
 #include "ziputils.h"
 
-static int write_file(const char *path, const char *payload) {
-    FILE *fp = fopen(path, "wb");
+static int write_file(const char* path, const char* payload) {
+    FILE* fp = fopen(path, "wb");
     if (!fp) {
         return -1;
     }
@@ -26,24 +26,23 @@ static int write_file(const char *path, const char *payload) {
     return 0;
 }
 
-static bool read_match(FILE *fp, const char *expected) {
+static bool read_match(FILE* fp, const char* expected) {
     char buf[64] = {0};
     size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
     return n == strlen(expected) && memcmp(buf, expected, n) == 0;
 }
 
 int main(void) {
-    ZContext *ctx = zu_context_create();
+    ZContext* ctx = zu_context_create();
     if (!ctx) {
         fprintf(stderr, "ctx alloc failed\n");
         return 1;
     }
 
     /* Nonexistent input should set an IO error and leave files NULL. */
-    const char *missing = "/tmp/zu_fileio_missing_does_not_exist";
+    const char* missing = "/tmp/zu_fileio_missing_does_not_exist";
     int rc = zu_open_input(ctx, missing);
-    if (rc == ZU_STATUS_OK || ctx->in_file != NULL || ctx->last_error != ZU_STATUS_IO ||
-        ctx->error_msg[0] == '\0') {
+    if (rc == ZU_STATUS_OK || ctx->in_file != NULL || ctx->last_error != ZU_STATUS_IO || ctx->error_msg[0] == '\0') {
         fprintf(stderr, "expected failure opening missing file\n");
         zu_context_free(ctx);
         return 1;
@@ -59,7 +58,7 @@ int main(void) {
     }
     close(read_fd);
 
-    const char *payload = "abc123";
+    const char* payload = "abc123";
     if (write_file(read_template, payload) != 0) {
         fprintf(stderr, "failed writing payload\n");
         unlink(read_template);
@@ -109,7 +108,7 @@ int main(void) {
     }
     zu_close_files(ctx);
 
-    FILE *verify = fopen(write_template, "rb");
+    FILE* verify = fopen(write_template, "rb");
     if (!verify || !read_match(verify, payload)) {
         fprintf(stderr, "verify read failed\n");
         if (verify) {

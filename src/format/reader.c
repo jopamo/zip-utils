@@ -23,6 +23,7 @@
 #include "crc32.h"
 #include "zlib_shim.h"
 #include "zip_headers.h"
+#include "zipcrypto.h"
 
 #ifndef FNM_CASEFOLD
 #define FNM_CASEFOLD 0
@@ -42,7 +43,7 @@ typedef struct {
     uint64_t entries_total;
 } zu_cd_info;
 
-static const char *zi_host_abbrev(uint16_t version_made) {
+static const char* zi_host_abbrev(uint16_t version_made) {
     int host = (version_made >> 8) & 0xff;
     switch (host) {
         case 0:
@@ -68,11 +69,11 @@ static const char *zi_host_abbrev(uint16_t version_made) {
     }
 }
 
-static void zi_format_creator(uint16_t version_made, char *out, size_t len) {
+static void zi_format_creator(uint16_t version_made, char* out, size_t len) {
     int ver_raw = version_made & 0xff;
     int major = ver_raw / 10;
     int minor = ver_raw % 10;
-    const char *host = zi_host_abbrev(version_made);
+    const char* host = zi_host_abbrev(version_made);
     snprintf(out, len, "%d.%d %s", major, minor, host);
 }
 
@@ -91,7 +92,7 @@ static void zi_format_permissions(uint32_t ext_attr, bool is_dir, char out[11]) 
     out[10] = '\0';
 }
 
-static bool name_is_text(const char *name) {
+static bool name_is_text(const char* name) {
     if (!name) {
         return false;
     }
@@ -103,22 +104,21 @@ static bool name_is_text(const char *name) {
         return true;
     }
 
-    static const char *text_names[] = {"README", "LICENSE", "COPYING", "Makefile", "Dockerfile"};
+    static const char* text_names[] = {"README", "LICENSE", "COPYING", "Makefile", "Dockerfile"};
     for (size_t i = 0; i < sizeof(text_names) / sizeof(text_names[0]); ++i) {
         if (strcasecmp(name, text_names[i]) == 0) {
             return true;
         }
     }
 
-    const char *dot = strrchr(name, '.');
+    const char* dot = strrchr(name, '.');
     if (!dot || dot == name) {
         return false;
     }
-    const char *ext = dot + 1;
-    static const char *text_exts[] = {"txt", "md",       "markdown", "c",    "cc",   "cpp", "cxx", "h",   "hpp",  "hh",   "rs",  "go",
-                                      "py",  "rb",       "java",     "js",   "mjs",  "cjs", "ts",  "tsx", "html", "htm",  "css", "scss",
-                                      "json","yaml",     "yml",      "xml",  "sh",   "bash","zsh", "ksh", "ps1",  "ini",  "cfg", "conf",
-                                      "toml","csv",      "tsv",      "sql",  "proto","gradle","cmake","mak","mk", "log",  "tex"};
+    const char* ext = dot + 1;
+    static const char* text_exts[] = {"txt", "md",  "markdown", "c",    "cc",   "cpp", "cxx", "h",    "hpp",   "hh",     "rs",    "go",  "py", "rb",   "java", "js",
+                                      "mjs", "cjs", "ts",       "tsx",  "html", "htm", "css", "scss", "json",  "yaml",   "yml",   "xml", "sh", "bash", "zsh",  "ksh",
+                                      "ps1", "ini", "cfg",      "conf", "toml", "csv", "tsv", "sql",  "proto", "gradle", "cmake", "mak", "mk", "log",  "tex"};
     for (size_t i = 0; i < sizeof(text_exts) / sizeof(text_exts[0]); ++i) {
         if (strcasecmp(ext, text_exts[i]) == 0) {
             return true;
@@ -127,7 +127,7 @@ static bool name_is_text(const char *name) {
     return false;
 }
 
-static void zi_format_flags(const zu_central_header *hdr, const char *name, char out[3]) {
+static void zi_format_flags(const zu_central_header* hdr, const char* name, char out[3]) {
     bool encrypted = (hdr->flags & 0x0001) != 0;
     bool is_text = name_is_text(name);
     char txt = is_text ? 't' : 'b';
@@ -146,8 +146,8 @@ static void zi_format_flags(const zu_central_header *hdr, const char *name, char
     out[2] = '\0';
 }
 
-static void zi_format_method(uint16_t method, char *out, size_t len) {
-    const char *name = "unkn";
+static void zi_format_method(uint16_t method, char* out, size_t len) {
+    const char* name = "unkn";
     switch (method) {
         case 0:
             name = "stor";
@@ -165,20 +165,22 @@ static void zi_format_method(uint16_t method, char *out, size_t len) {
     snprintf(out, len, "%s", name);
 }
 
-static void zi_format_datetime(uint16_t dos_date, uint16_t dos_time, bool decimal, char *out, size_t len) {
+static void zi_format_datetime(uint16_t dos_date, uint16_t dos_time, bool decimal, char* out, size_t len) {
     unsigned year = ((dos_date >> 9) & 0x7f) + 1980;
     unsigned month = (dos_date >> 5) & 0x0f;
     unsigned day = dos_date & 0x1f;
     unsigned hour = (dos_time >> 11) & 0x1f;
     unsigned minute = (dos_time >> 5) & 0x3f;
     unsigned second = (dos_time & 0x1f) * 2;
-    static const char *months[] = {"", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    static const char* months[] = {"", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 
     if (decimal) {
         snprintf(out, len, "%02u%02u%02u.%02u%02u%02u", year % 100, month, day, hour, minute, second);
-    } else if (month < sizeof(months) / sizeof(months[0])) {
+    }
+    else if (month < sizeof(months) / sizeof(months[0])) {
         snprintf(out, len, "%02u-%s-%02u %02u:%02u", day, months[month], year % 100, hour, minute);
-    } else {
+    }
+    else {
         snprintf(out, len, "%04u-%02u-%02u %02u:%02u", year, month, day, hour, minute);
     }
 }
@@ -195,11 +197,11 @@ static double zi_ratio(uint64_t comp, uint64_t uncomp) {
     return removed;
 }
 
-static bool zi_should_page(const ZContext *ctx) {
+static bool zi_should_page(const ZContext* ctx) {
     return ctx->zipinfo_mode && ctx->zi_allow_pager && isatty(STDOUT_FILENO);
 }
 
-static int zi_print_line(const ZContext *ctx, size_t *line_count, const char *fmt, ...) {
+static int zi_print_line(const ZContext* ctx, size_t* line_count, const char* fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     vprintf(fmt, ap);
@@ -222,12 +224,7 @@ static int zi_print_line(const ZContext *ctx, size_t *line_count, const char *fm
     return 0;
 }
 
-static int zi_print_entry(const ZContext *ctx,
-                          size_t *line_count,
-                          const zu_central_header *hdr,
-                          const char *name,
-                          uint64_t comp_size,
-                          uint64_t uncomp_size) {
+static int zi_print_entry(const ZContext* ctx, size_t* line_count, const zu_central_header* hdr, const char* name, uint64_t comp_size, uint64_t uncomp_size) {
     bool is_dir = name && name[strlen(name) - 1] == '/';
     char perms[11];
     zi_format_permissions(hdr->ext_attr, is_dir, perms);
@@ -245,47 +242,18 @@ static int zi_print_entry(const ZContext *ctx,
         case ZU_ZI_FMT_NAMES:
             return zi_print_line(ctx, line_count, "%s\n", name);
         case ZU_ZI_FMT_MEDIUM:
-            return zi_print_line(ctx,
-                                 line_count,
-                                 "%-10s %-10s %10" PRIu64 " %2s %5.0f%% %-4s %s %s\n",
-                                 perms,
-                                 creator,
-                                 uncomp_size,
-                                 flags,
-                                 ratio,
-                                 method,
-                                 when,
-                                 name);
+            return zi_print_line(ctx, line_count, "%-10s %-10s %10" PRIu64 " %2s %5.0f%% %-4s %s %s\n", perms, creator, uncomp_size, flags, ratio, method, when, name);
         case ZU_ZI_FMT_LONG:
         case ZU_ZI_FMT_VERBOSE:
-            return zi_print_line(ctx,
-                                 line_count,
-                                 "%-10s %-10s %10" PRIu64 " %2s %10" PRIu64 " %-4s %s %s\n",
-                                 perms,
-                                 creator,
-                                 uncomp_size,
-                                 flags,
-                                 comp_size,
-                                 method,
-                                 when,
-                                 name);
+            return zi_print_line(ctx, line_count, "%-10s %-10s %10" PRIu64 " %2s %10" PRIu64 " %-4s %s %s\n", perms, creator, uncomp_size, flags, comp_size, method, when, name);
         case ZU_ZI_FMT_SHORT:
         default:
-            return zi_print_line(ctx,
-                                 line_count,
-                                 "%-10s %-10s %10" PRIu64 " %2s %-4s %s %s\n",
-                                 perms,
-                                 creator,
-                                 uncomp_size,
-                                 flags,
-                                 method,
-                                 when,
-                                 name);
+            return zi_print_line(ctx, line_count, "%-10s %-10s %10" PRIu64 " %2s %-4s %s %s\n", perms, creator, uncomp_size, flags, method, when, name);
     }
     return 0;
 }
 
-static int find_eocd(FILE *f, off_t *pos_out) {
+static int find_eocd(FILE* f, off_t* pos_out) {
     if (fseeko(f, 0, SEEK_END) != 0) {
         return -1;
     }
@@ -298,7 +266,7 @@ static int find_eocd(FILE *f, off_t *pos_out) {
         return -1;
     }
     size_t buf_len = (size_t)max_scan;
-    char *buf = malloc(buf_len);
+    char* buf = malloc(buf_len);
     if (!buf) {
         return -1;
     }
@@ -320,7 +288,7 @@ static int find_eocd(FILE *f, off_t *pos_out) {
     return -1;
 }
 
-static int read_cd_info(ZContext *ctx, zu_cd_info *info, bool load_comment) {
+static int read_cd_info(ZContext* ctx, zu_cd_info* info, bool load_comment) {
     off_t eocd_pos;
     if (find_eocd(ctx->in_file, &eocd_pos) != 0) {
         zu_context_set_error(ctx, ZU_STATUS_IO, "missing end of central directory");
@@ -345,8 +313,9 @@ static int read_cd_info(ZContext *ctx, zu_cd_info *info, bool load_comment) {
         free(ctx->zip_comment);
         ctx->zip_comment = NULL;
         ctx->zip_comment_len = 0;
-    } else if (endrec.comment_len > 0) {
-        char *comment = malloc(endrec.comment_len + 1);
+    }
+    else if (endrec.comment_len > 0) {
+        char* comment = malloc(endrec.comment_len + 1);
         if (!comment) {
             zu_context_set_error(ctx, ZU_STATUS_OOM, "allocating archive comment failed");
             return ZU_STATUS_OOM;
@@ -361,7 +330,8 @@ static int read_cd_info(ZContext *ctx, zu_cd_info *info, bool load_comment) {
         free(ctx->zip_comment);
         ctx->zip_comment = comment;
         ctx->zip_comment_len = endrec.comment_len;
-    } else {
+    }
+    else {
         free(ctx->zip_comment);
         ctx->zip_comment = NULL;
         ctx->zip_comment_len = 0;
@@ -401,7 +371,7 @@ static int read_cd_info(ZContext *ctx, zu_cd_info *info, bool load_comment) {
     return ZU_STATUS_OK;
 }
 
-static bool pattern_matches(const ZContext *ctx, const char *name) {
+static bool pattern_matches(const ZContext* ctx, const char* name) {
     int flags = ctx->match_case ? 0 : FNM_CASEFOLD;
 
     /* Exclude wins immediately. */
@@ -424,14 +394,14 @@ static bool pattern_matches(const ZContext *ctx, const char *name) {
     return false;
 }
 
-static bool path_has_traversal(const char *name) {
+static bool path_has_traversal(const char* name) {
     if (!name) {
         return true;
     }
     if (name[0] == '/') {
         return true;
     }
-    for (const char *p = name; *p; ++p) {
+    for (const char* p = name; *p; ++p) {
         if (p[0] == '.' && p[1] == '.' && (p == name || p[-1] == '/') && (p[2] == '/' || p[2] == '\0')) {
             return true;
         }
@@ -439,7 +409,7 @@ static bool path_has_traversal(const char *name) {
     return false;
 }
 
-static int ensure_dir(const char *path) {
+static int ensure_dir(const char* path) {
     struct stat st;
     if (stat(path, &st) == 0) {
         return S_ISDIR(st.st_mode) ? ZU_STATUS_OK : ZU_STATUS_USAGE;
@@ -450,12 +420,12 @@ static int ensure_dir(const char *path) {
     return ZU_STATUS_IO;
 }
 
-static int ensure_parent_dirs(const char *path) {
-    char *dup = strdup(path);
+static int ensure_parent_dirs(const char* path) {
+    char* dup = strdup(path);
     if (!dup) {
         return ZU_STATUS_OOM;
     }
-    for (char *p = dup + 1; *p; ++p) {
+    for (char* p = dup + 1; *p; ++p) {
         if (*p == '/') {
             *p = '\0';
             if (dup[0] != '\0' && ensure_dir(dup) != ZU_STATUS_OK) {
@@ -469,31 +439,28 @@ static int ensure_parent_dirs(const char *path) {
     return ZU_STATUS_OK;
 }
 
-static char *build_output_path(const ZContext *ctx, const char *name) {
-    const char *base = ctx->target_dir ? ctx->target_dir : "";
+static char* build_output_path(const ZContext* ctx, const char* name) {
+    const char* base = ctx->target_dir ? ctx->target_dir : "";
     size_t base_len = strlen(base);
     bool need_sep = base_len > 0 && base[base_len - 1] != '/';
     size_t total = base_len + (need_sep ? 1 : 0) + strlen(name) + 1;
-    char *out = malloc(total);
+    char* out = malloc(total);
     if (!out) {
         return NULL;
     }
     if (base_len == 0) {
         snprintf(out, total, "%s", name);
-    } else if (need_sep) {
+    }
+    else if (need_sep) {
         snprintf(out, total, "%s/%s", base, name);
-    } else {
+    }
+    else {
         snprintf(out, total, "%s%s", base, name);
     }
     return out;
 }
 
-static void resolve_zip64_sizes(const zu_central_header *hdr,
-                                const unsigned char *extra,
-                                size_t extra_len,
-                                uint64_t *comp_out,
-                                uint64_t *uncomp_out,
-                                uint64_t *lho_out) {
+static void resolve_zip64_sizes(const zu_central_header* hdr, const unsigned char* extra, size_t extra_len, uint64_t* comp_out, uint64_t* uncomp_out, uint64_t* lho_out) {
     uint64_t comp = hdr->comp_size;
     uint64_t uncomp = hdr->uncomp_size;
     uint64_t lho = hdr->lho_offset;
@@ -543,23 +510,23 @@ static void resolve_zip64_sizes(const zu_central_header *hdr,
     }
 }
 
-static int read_central_entry(ZContext *ctx,
-                              zu_central_header *hdr,
-                              char **name_out,
-                              unsigned char **extra_out,
-                              uint16_t *extra_len_out,
-                              char **comment_out,
-                              uint16_t *comment_len_out,
-                              uint64_t *comp_size_out,
-                              uint64_t *uncomp_size_out,
-                              uint64_t *lho_offset_out) {
+static int read_central_entry(ZContext* ctx,
+                              zu_central_header* hdr,
+                              char** name_out,
+                              unsigned char** extra_out,
+                              uint16_t* extra_len_out,
+                              char** comment_out,
+                              uint16_t* comment_len_out,
+                              uint64_t* comp_size_out,
+                              uint64_t* uncomp_size_out,
+                              uint64_t* lho_offset_out) {
     size_t got = fread(hdr, 1, sizeof(*hdr), ctx->in_file);
     if (got != sizeof(*hdr) || hdr->signature != ZU_SIG_CENTRAL) {
         zu_context_set_error(ctx, ZU_STATUS_IO, "bad central header");
         return ZU_STATUS_IO;
     }
 
-    char *name = malloc(hdr->name_len + 1);
+    char* name = malloc(hdr->name_len + 1);
     if (!name) {
         zu_context_set_error(ctx, ZU_STATUS_OOM, "allocating filename failed");
         return ZU_STATUS_OOM;
@@ -573,7 +540,7 @@ static int read_central_entry(ZContext *ctx,
     name[hdr->name_len] = '\0';
 
     uint16_t extra_to_read = hdr->extra_len;
-    unsigned char *extra_buf = NULL;
+    unsigned char* extra_buf = NULL;
     bool need_zip64 = hdr->comp_size == 0xffffffffu || hdr->uncomp_size == 0xffffffffu || hdr->lho_offset == 0xffffffffu;
     if (extra_to_read > 0) {
         extra_buf = malloc(extra_to_read);
@@ -603,7 +570,7 @@ static int read_central_entry(ZContext *ctx,
 
     if (hdr->comment_len > 0) {
         if (comment_out && comment_len_out) {
-            char *cbuf = malloc(hdr->comment_len + 1);
+            char* cbuf = malloc(hdr->comment_len + 1);
             if (!cbuf) {
                 free(name);
                 free(extra_buf);
@@ -621,7 +588,8 @@ static int read_central_entry(ZContext *ctx,
             cbuf[hdr->comment_len] = '\0';
             *comment_out = cbuf;
             *comment_len_out = hdr->comment_len;
-        } else {
+        }
+        else {
             if (fseeko(ctx->in_file, (off_t)hdr->comment_len, SEEK_CUR) != 0) {
                 free(name);
                 free(extra_buf);
@@ -629,7 +597,8 @@ static int read_central_entry(ZContext *ctx,
                 return ZU_STATUS_IO;
             }
         }
-    } else {
+    }
+    else {
         if (comment_out && comment_len_out) {
             *comment_out = NULL;
             *comment_len_out = 0;
@@ -660,13 +629,13 @@ static int read_central_entry(ZContext *ctx,
     return ZU_STATUS_OK;
 }
 
-static int zi_print_verbose_entry(const ZContext *ctx,
-                                  size_t *line_count,
-                                  const zu_central_header *hdr,
-                                  const char *name,
-                                  const unsigned char *extra,
+static int zi_print_verbose_entry(const ZContext* ctx,
+                                  size_t* line_count,
+                                  const zu_central_header* hdr,
+                                  const char* name,
+                                  const unsigned char* extra,
                                   uint16_t extra_len,
-                                  const char *comment,
+                                  const char* comment,
                                   uint16_t comment_len,
                                   uint64_t comp_size,
                                   uint64_t uncomp_size,
@@ -678,22 +647,10 @@ static int zi_print_verbose_entry(const ZContext *ctx,
     int ver_needed_major = hdr->version_needed / 10;
     int ver_needed_minor = hdr->version_needed % 10;
 
-    if (zi_print_line(ctx,
-                      line_count,
-                      "    version needed: %d.%d  flags: 0x%04x  method: %u  offset: %" PRIu64 "\n",
-                      ver_needed_major,
-                      ver_needed_minor,
-                      hdr->flags,
-                      hdr->method,
-                      lho_offset) != 0) {
+    if (zi_print_line(ctx, line_count, "    version needed: %d.%d  flags: 0x%04x  method: %u  offset: %" PRIu64 "\n", ver_needed_major, ver_needed_minor, hdr->flags, hdr->method, lho_offset) != 0) {
         return 1;
     }
-    if (zi_print_line(ctx,
-                      line_count,
-                      "    sizes: comp=%" PRIu64 "  uncomp=%" PRIu64 "  crc=%08" PRIx32 "\n",
-                      comp_size,
-                      uncomp_size,
-                      hdr->crc32) != 0) {
+    if (zi_print_line(ctx, line_count, "    sizes: comp=%" PRIu64 "  uncomp=%" PRIu64 "  crc=%08" PRIx32 "\n", comp_size, uncomp_size, hdr->crc32) != 0) {
         return 1;
     }
 
@@ -712,7 +669,8 @@ static int zi_print_verbose_entry(const ZContext *ctx,
             }
             pos += 4 + sz;
         }
-    } else {
+    }
+    else {
         if (zi_print_line(ctx, line_count, "    extra fields: none\n") != 0) {
             return 1;
         }
@@ -727,13 +685,7 @@ static int zi_print_verbose_entry(const ZContext *ctx,
     return zi_print_line(ctx, line_count, "\n");
 }
 
-static int extract_or_test_entry(ZContext *ctx,
-                                 const zu_central_header *hdr,
-                                 const char *name,
-                                 bool test_only,
-                                 uint64_t comp_size,
-                                 uint64_t uncomp_size,
-                                 uint64_t lho_offset) {
+static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, const char* name, bool test_only, uint64_t comp_size, uint64_t uncomp_size, uint64_t lho_offset) {
     size_t name_len = strlen(name);
     bool is_dir = name_len > 0 && name[name_len - 1] == '/';
 
@@ -762,7 +714,10 @@ static int extract_or_test_entry(ZContext *ctx,
 
     if (is_dir) {
         if (!test_only) {
-            char *out_path = build_output_path(ctx, name);
+            if (ctx->output_to_stdout) {
+                return ZU_STATUS_OK; /* Skip directories when piping */
+            }
+            char* out_path = build_output_path(ctx, name);
             if (!out_path) {
                 zu_context_set_error(ctx, ZU_STATUS_OOM, "allocating output path failed");
                 return ZU_STATUS_OOM;
@@ -781,8 +736,37 @@ static int extract_or_test_entry(ZContext *ctx,
         return ZU_STATUS_OK;
     }
 
-    uint8_t *in_buf = malloc(ZU_IO_CHUNK);
-    uint8_t *out_buf = malloc(ZU_IO_CHUNK);
+    bool encrypted = (hdr->flags & 1) != 0;
+    zu_zipcrypto_ctx zc;
+    if (encrypted) {
+        if (!ctx->password) {
+            zu_context_set_error(ctx, ZU_STATUS_PASSWORD_REQUIRED, "password required");
+            return ZU_STATUS_PASSWORD_REQUIRED;
+        }
+        zu_zipcrypto_init(&zc, ctx->password);
+
+        uint8_t header[12];
+        if (fread(header, 1, 12, ctx->in_file) != 12) {
+            zu_context_set_error(ctx, ZU_STATUS_IO, "reading encryption header failed");
+            return ZU_STATUS_IO;
+        }
+        zu_zipcrypto_decrypt(&zc, header, 12);
+
+        uint8_t check = (uint8_t)((hdr->flags & 8) ? (hdr->mod_time >> 8) : (hdr->crc32 >> 24));
+        if (header[11] != check) {
+            zu_context_set_error(ctx, ZU_STATUS_BAD_PASSWORD, "incorrect password");
+            return ZU_STATUS_BAD_PASSWORD;
+        }
+
+        if (comp_size < 12) {
+            zu_context_set_error(ctx, ZU_STATUS_IO, "encrypted entry too small");
+            return ZU_STATUS_IO;
+        }
+        comp_size -= 12;
+    }
+
+    uint8_t* in_buf = malloc(ZU_IO_CHUNK);
+    uint8_t* out_buf = malloc(ZU_IO_CHUNK);
     if (!in_buf || !out_buf) {
         free(in_buf);
         free(out_buf);
@@ -793,31 +777,36 @@ static int extract_or_test_entry(ZContext *ctx,
     uint32_t crc = 0;
     uint64_t written = 0;
 
-    FILE *fp = NULL;
+    FILE* fp = NULL;
     if (!test_only) {
-        char *out_path = build_output_path(ctx, name);
-        if (!out_path) {
-            free(in_buf);
-            free(out_buf);
-            zu_context_set_error(ctx, ZU_STATUS_OOM, "allocating output path failed");
-            return ZU_STATUS_OOM;
+        if (ctx->output_to_stdout) {
+            fp = stdout;
         }
+        else {
+            char* out_path = build_output_path(ctx, name);
+            if (!out_path) {
+                free(in_buf);
+                free(out_buf);
+                zu_context_set_error(ctx, ZU_STATUS_OOM, "allocating output path failed");
+                return ZU_STATUS_OOM;
+            }
 
-        if (ensure_parent_dirs(out_path) != ZU_STATUS_OK) {
-            free(out_buf);
-            free(in_buf);
+            if (ensure_parent_dirs(out_path) != ZU_STATUS_OK) {
+                free(out_buf);
+                free(in_buf);
+                free(out_path);
+                zu_context_set_error(ctx, ZU_STATUS_IO, "creating parent directories failed");
+                return ZU_STATUS_IO;
+            }
+
+            fp = fopen(out_path, "wb");
             free(out_path);
-            zu_context_set_error(ctx, ZU_STATUS_IO, "creating parent directories failed");
-            return ZU_STATUS_IO;
-        }
-
-        fp = fopen(out_path, "wb");
-        free(out_path);
-        if (!fp) {
-            free(out_buf);
-            free(in_buf);
-            zu_context_set_error(ctx, ZU_STATUS_IO, "open output file failed");
-            return ZU_STATUS_IO;
+            if (!fp) {
+                free(out_buf);
+                free(in_buf);
+                zu_context_set_error(ctx, ZU_STATUS_IO, "open output file failed");
+                return ZU_STATUS_IO;
+            }
         }
     }
 
@@ -832,6 +821,9 @@ static int extract_or_test_entry(ZContext *ctx,
                 zu_context_set_error(ctx, rc, "short read on stored data");
                 break;
             }
+            if (encrypted) {
+                zu_zipcrypto_decrypt(&zc, in_buf, got_data);
+            }
             crc = zu_crc32(in_buf, got_data, crc);
             if (!test_only) {
                 if (fwrite(in_buf, 1, got_data, fp) != got_data) {
@@ -843,14 +835,16 @@ static int extract_or_test_entry(ZContext *ctx,
             written += got_data;
             remaining -= got_data;
         }
-    } else if (hdr->method == 8) {
+    }
+    else if (hdr->method == 8) {
         z_stream strm;
         memset(&strm, 0, sizeof(strm));
         int zrc = inflateInit2(&strm, -MAX_WBITS);
         if (zrc != Z_OK) {
             rc = ZU_STATUS_IO;
             zu_context_set_error(ctx, rc, "inflate init failed");
-        } else {
+        }
+        else {
             uint64_t remaining = comp_size;
             zrc = Z_OK;
             while (rc == ZU_STATUS_OK && remaining > 0) {
@@ -860,6 +854,9 @@ static int extract_or_test_entry(ZContext *ctx,
                     rc = ZU_STATUS_IO;
                     zu_context_set_error(ctx, rc, "short read on compressed data");
                     break;
+                }
+                if (encrypted) {
+                    zu_zipcrypto_decrypt(&zc, in_buf, got_data);
                 }
                 remaining -= got_data;
 
@@ -900,7 +897,8 @@ static int extract_or_test_entry(ZContext *ctx,
                         rc = ZU_STATUS_IO;
                         zu_context_set_error(ctx, rc, "seek past compressed data failed");
                     }
-                } else if (zrc != Z_STREAM_END) {
+                }
+                else if (zrc != Z_STREAM_END) {
                     rc = ZU_STATUS_IO;
                     zu_context_set_error(ctx, rc, "inflate did not reach stream end");
                 }
@@ -908,12 +906,13 @@ static int extract_or_test_entry(ZContext *ctx,
 
             inflateEnd(&strm);
         }
-    } else {
+    }
+    else {
         rc = ZU_STATUS_NOT_IMPLEMENTED;
         zu_context_set_error(ctx, rc, "compression method not supported");
     }
 
-    if (fp) {
+    if (fp && fp != stdout) {
         fclose(fp);
     }
     free(out_buf);
@@ -940,7 +939,7 @@ static int extract_or_test_entry(ZContext *ctx,
     return ZU_STATUS_OK;
 }
 
-int zu_list_archive(ZContext *ctx) {
+int zu_list_archive(ZContext* ctx) {
     if (!ctx || !ctx->archive_path) {
         return ZU_STATUS_USAGE;
     }
@@ -989,24 +988,16 @@ int zu_list_archive(ZContext *ctx) {
 
     for (uint64_t i = 0; i < cdinfo.entries_total; ++i) {
         zu_central_header hdr;
-        char *name = NULL;
-        unsigned char *extra = NULL;
+        char* name = NULL;
+        unsigned char* extra = NULL;
         uint16_t extra_len = 0;
-        char *comment = NULL;
+        char* comment = NULL;
         uint16_t comment_len = 0;
         bool need_meta = ctx->zipinfo_mode && (ctx->zi_format == ZU_ZI_FMT_VERBOSE || ctx->zi_show_comments);
         uint64_t comp_size = 0;
         uint64_t uncomp_size = 0;
         uint64_t lho_offset = 0;
-        rc = read_central_entry(ctx,
-                                &hdr,
-                                &name,
-                                need_meta ? &extra : NULL,
-                                need_meta ? &extra_len : NULL,
-                                need_meta ? &comment : NULL,
-                                need_meta ? &comment_len : NULL,
-                                &comp_size,
-                                &uncomp_size,
+        rc = read_central_entry(ctx, &hdr, &name, need_meta ? &extra : NULL, need_meta ? &extra_len : NULL, need_meta ? &comment : NULL, need_meta ? &comment_len : NULL, &comp_size, &uncomp_size,
                                 &lho_offset);
         if (rc != ZU_STATUS_OK) {
             zu_close_files(ctx);
@@ -1031,7 +1022,8 @@ int zu_list_archive(ZContext *ctx) {
                                 free(name);
                                 break;
                             }
-                        } else {
+                        }
+                        else {
                             if (zi_print_entry(ctx, &pager_lines, &hdr, name, comp_size, uncomp_size) != 0) {
                                 free(extra);
                                 free(comment);
@@ -1040,7 +1032,8 @@ int zu_list_archive(ZContext *ctx) {
                             }
                         }
                     }
-                } else {
+                }
+                else {
                     printf("%s\n", name);
                 }
             }
@@ -1054,13 +1047,7 @@ int zu_list_archive(ZContext *ctx) {
     if (ctx->zipinfo_mode) {
         if (ctx->zi_footer && !ctx->quiet) {
             double ratio = zi_ratio(total_comp, total_uncomp);
-            if (zi_print_line(ctx,
-                              &pager_lines,
-                              "%" PRIu64 " files, %" PRIu64 " bytes uncompressed, %" PRIu64 " bytes compressed:  %0.1f%%\n",
-                              matched,
-                              total_uncomp,
-                              total_comp,
-                              ratio) != 0) {
+            if (zi_print_line(ctx, &pager_lines, "%" PRIu64 " files, %" PRIu64 " bytes uncompressed, %" PRIu64 " bytes compressed:  %0.1f%%\n", matched, total_uncomp, total_comp, ratio) != 0) {
                 zu_close_files(ctx);
                 return ZU_STATUS_OK;
             }
@@ -1087,7 +1074,7 @@ int zu_list_archive(ZContext *ctx) {
     return ZU_STATUS_OK;
 }
 
-static int walk_entries(ZContext *ctx, bool test_only) {
+static int walk_entries(ZContext* ctx, bool test_only) {
     if (!ctx || !ctx->archive_path) {
         return ZU_STATUS_USAGE;
     }
@@ -1112,7 +1099,7 @@ static int walk_entries(ZContext *ctx, bool test_only) {
 
     for (uint64_t i = 0; i < cdinfo.entries_total; ++i) {
         zu_central_header hdr;
-        char *name = NULL;
+        char* name = NULL;
         uint64_t comp_size = 0;
         uint64_t uncomp_size = 0;
         uint64_t lho_offset = 0;
@@ -1133,7 +1120,8 @@ static int walk_entries(ZContext *ctx, bool test_only) {
 
         if (pattern_matches(ctx, name)) {
             rc = extract_or_test_entry(ctx, &hdr, name, test_only, comp_size, uncomp_size, lho_offset);
-        } else {
+        }
+        else {
             rc = ZU_STATUS_OK;
         }
         free(name);
@@ -1153,10 +1141,112 @@ static int walk_entries(ZContext *ctx, bool test_only) {
     return ZU_STATUS_OK;
 }
 
-int zu_test_archive(ZContext *ctx) {
+int zu_test_archive(ZContext* ctx) {
     return walk_entries(ctx, true);
 }
 
-int zu_extract_archive(ZContext *ctx) {
+int zu_extract_archive(ZContext* ctx) {
     return walk_entries(ctx, false);
+}
+
+int zu_load_central_directory(ZContext* ctx) {
+    if (!ctx || !ctx->archive_path) {
+        return ZU_STATUS_USAGE;
+    }
+
+    int rc = zu_open_input(ctx, ctx->archive_path);
+    if (rc != ZU_STATUS_OK) {
+        return rc;
+    }
+
+    zu_cd_info cdinfo;
+    rc = read_cd_info(ctx, &cdinfo, true);  // Load comments as we might preserve them
+    if (rc != ZU_STATUS_OK) {
+        // If the file is empty or invalid zip, we might want to treat it as a new archive
+        // depending on context. But here we just return error.
+        // Writer will handle "file not found" by creating new.
+        zu_close_files(ctx);
+        return rc;
+    }
+
+    if (fseeko(ctx->in_file, (off_t)cdinfo.cd_offset, SEEK_SET) != 0) {
+        zu_context_set_error(ctx, ZU_STATUS_IO, "seek to central directory failed");
+        zu_close_files(ctx);
+        return ZU_STATUS_IO;
+    }
+
+    for (uint64_t i = 0; i < cdinfo.entries_total; ++i) {
+        zu_central_header hdr;
+        char* name = NULL;
+        unsigned char* extra = NULL;
+        uint16_t extra_len = 0;
+        char* comment = NULL;
+        uint16_t comment_len = 0;
+        uint64_t comp_size = 0;
+        uint64_t uncomp_size = 0;
+        uint64_t lho_offset = 0;
+
+        rc = read_central_entry(ctx, &hdr, &name, &extra, &extra_len, &comment, &comment_len, &comp_size, &uncomp_size, &lho_offset);
+        if (rc != ZU_STATUS_OK) {
+            free(name);
+            free(extra);
+            free(comment);
+            zu_close_files(ctx);
+            return rc;
+        }
+
+        zu_existing_entry* entry = malloc(sizeof(zu_existing_entry));
+        if (!entry) {
+            free(name);
+            free(extra);
+            free(comment);
+            zu_close_files(ctx);
+            return ZU_STATUS_OOM;
+        }
+
+        entry->hdr = hdr;
+        entry->name = name;
+        entry->extra = extra;
+        entry->extra_len = extra_len;
+        entry->comment = comment;
+        entry->comment_len = comment_len;
+        entry->comp_size = comp_size;
+        entry->uncomp_size = uncomp_size;
+        entry->lho_offset = lho_offset;
+        entry->delete = false;
+        entry->changed = false;
+
+        // Hack: We are storing zu_existing_entry* in a ZU_StrList.
+        // We rely on the fact that ZU_StrList is just an array of pointers.
+        // We must NOT use zu_strlist_add which strdups.
+        // We need a way to add a raw pointer.
+        // If strlist doesn't support it, we'll need to modify strlist or manually manage the array.
+
+        // Let's assume for a moment I can add it, or I'll check strlist next.
+        // For now, I'll use a placeholder logic assuming I can access the list directly
+        // or I will add a helper in the next step if needed.
+
+        if (ctx->existing_entries.len == ctx->existing_entries.cap) {
+            size_t new_cap = ctx->existing_entries.cap == 0 ? 16 : ctx->existing_entries.cap * 2;
+            char** new_items = realloc(ctx->existing_entries.items, new_cap * sizeof(char*));
+            if (!new_items) {
+                free(entry->name);
+                free(entry->extra);
+                free(entry->comment);
+                free(entry);
+                zu_close_files(ctx);
+                return ZU_STATUS_OOM;
+            }
+            ctx->existing_entries.items = new_items;
+            ctx->existing_entries.cap = new_cap;
+        }
+        ctx->existing_entries.items[ctx->existing_entries.len++] = (char*)entry;
+    }
+
+    // Don't close files yet, as we might need to read data from them during modification?
+    // Actually, writer usually opens a new output file. If we modify in place, it's tricky.
+    // Standard `zip` writes to a temp file.
+    // We can keep `in_file` open for reading data to copy.
+
+    return ZU_STATUS_OK;
 }

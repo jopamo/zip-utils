@@ -6,13 +6,13 @@
 #include "reader.h"
 #include "ziputils.h"
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: %s archive.zip\n", argv[0]);
         return 1;
     }
 
-    ZContext *ctx = zu_context_create();
+    ZContext* ctx = zu_context_create();
     if (!ctx) {
         fprintf(stderr, "alloc failed\n");
         return 1;

@@ -39,6 +39,7 @@ core_sources = files(
   'src/common/fileio.c',
   'src/compression/zlib_shim.c',
   'src/compression/crc32.c',
+  'src/compression/zipcrypto.c',
   'src/format/reader.c',
   'src/format/writer.c'
 )
@@ -62,7 +63,7 @@ zip_exe = executable(
   dependencies: [zlib_dep],
   c_args: extra_c_args,
   link_args: extra_link_args,
-  install: false
+  install: true
 )
 
 unzip_exe = executable(
@@ -73,8 +74,10 @@ unzip_exe = executable(
   dependencies: [zlib_dep],
   c_args: extra_c_args,
   link_args: extra_link_args,
-  install: false
+  install: true
 )
+
+meson.add_install_script('build-aux/install-symlinks.sh')
 
 # --- Tests ---
 
@@ -173,6 +176,15 @@ test('integration-zipinfo', python3,
   env: {
     'ZIP_BIN': 'zip',
     'ZIPINFO_BIN': unzip_exe.full_path()
+  },
+  timeout: 30
+)
+
+test('integration-crypto', python3,
+  args: [meson.project_source_root() / 'tests/test_crypto_integration.py'],
+  env: {
+    'WRITE_BIN': zip_exe.full_path(),
+    'UNZIP_REWRITE_BIN': unzip_exe.full_path()
   },
   timeout: 30
 )

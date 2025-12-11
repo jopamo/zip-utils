@@ -3,10 +3,10 @@
 
 #include <stdint.h>
 
-#define ZU_SIG_LOCAL   0x04034b50u
+#define ZU_SIG_LOCAL 0x04034b50u
 #define ZU_SIG_CENTRAL 0x02014b50u
-#define ZU_SIG_END     0x06054b50u
-#define ZU_SIG_END64   0x06064b50u
+#define ZU_SIG_END 0x06054b50u
+#define ZU_SIG_END64 0x06064b50u
 #define ZU_SIG_END64LOC 0x07064b50u
 #define ZU_SIG_DESCRIPTOR 0x08074b50u
 

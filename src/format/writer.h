@@ -3,7 +3,7 @@
 
 #include "ctx.h"
 
-/* Create a new archive at ctx->archive_path (or stdout if set) from ctx->include items. */
-int zu_write_archive(ZContext *ctx);
+/* Create or modify an archive at ctx->archive_path (or stdout if set) from ctx->include items. */
+int zu_modify_archive(ZContext* ctx);
 
 #endif

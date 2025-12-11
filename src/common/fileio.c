@@ -4,14 +4,14 @@
 #include <stdio.h>
 #include <string.h>
 
-static void close_file(FILE **fp) {
+static void close_file(FILE** fp) {
     if (fp && *fp) {
         fclose(*fp);
         *fp = NULL;
     }
 }
 
-int zu_open_input(ZContext *ctx, const char *path) {
+int zu_open_input(ZContext* ctx, const char* path) {
     if (!ctx || !path) {
         return ZU_STATUS_USAGE;
     }
@@ -26,7 +26,7 @@ int zu_open_input(ZContext *ctx, const char *path) {
     return ZU_STATUS_OK;
 }
 
-int zu_open_output(ZContext *ctx, const char *path, const char *mode) {
+int zu_open_output(ZContext* ctx, const char* path, const char* mode) {
     if (!ctx || !path) {
         return ZU_STATUS_USAGE;
     }
@@ -41,7 +41,7 @@ int zu_open_output(ZContext *ctx, const char *path, const char *mode) {
     return ZU_STATUS_OK;
 }
 
-void zu_close_files(ZContext *ctx) {
+void zu_close_files(ZContext* ctx) {
     if (!ctx) {
         return;
     }

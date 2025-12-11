@@ -9,6 +9,13 @@
 #include "ctx.h"
 #include "ops.h"
 #include "ziputils.h"
+#include "reader.h"
+
+static bool is_alias(const char* argv0, const char* name) {
+    const char* base = strrchr(argv0, '/');
+    base = base ? base + 1 : argv0;
+    return strcmp(base, name) == 0;
+}
 
 static int map_exit_code(int status) {
     switch (status) {
@@ -27,41 +34,36 @@ static int map_exit_code(int status) {
     }
 }
 
-static void print_usage(FILE *to, const char *argv0) {
-    fprintf(
-        to,
-        "Usage: %s [options] archive.zip [inputs...]\n"
-        "\n"
-        "Modern rewrite stub: captures options into a reentrant context but\n"
-        "does not yet perform archiving.\n"
-        "\n"
-        "Common options:\n"
-        "  -r, --recurse-paths   Recurse into directories\n"
-        "  -j                    Junk directory paths\n"
-        "  -m                    Move input files (delete after)\n"
-        "  -u                    Update: add only newer files\n"
-        "  -f                    Freshen: replace existing entries\n"
-        "  -T                    Test archive after writing\n"
-        "  -q / -v               Quiet / verbose output\n"
-        "  -x pattern            Exclude pattern (can repeat)\n"
-        "  -i pattern            Include pattern (can repeat)\n"
-        "  -0 .. -9              Compression level\n"
-        "  --help                Show this help\n",
-        argv0);
+static void print_usage(FILE* to, const char* argv0) {
+    fprintf(to,
+            "Usage: %s [options] archive.zip [inputs...]\n"
+            "\n"
+            "Modern rewrite stub: captures options into a reentrant context but\n"
+            "does not yet perform archiving.\n"
+            "\n"
+            "Common options:\n"
+            "  -r, --recurse-paths   Recurse into directories\n"
+            "  -j                    Junk directory paths\n"
+            "  -m                    Move input files (delete after)\n"
+            "  -u                    Update: add only newer files\n"
+            "  -f                    Freshen: replace existing entries\n"
+            "  -T                    Test archive after writing\n"
+            "  -q / -v               Quiet / verbose output\n"
+            "  -x pattern            Exclude pattern (can repeat)\n"
+            "  -i pattern            Include pattern (can repeat)\n"
+            "  -0 .. -9              Compression level\n"
+            "  --help                Show this help\n",
+            argv0);
 }
 
-static int parse_zip_args(int argc, char **argv, ZContext *ctx) {
+static int parse_zip_args(int argc, char** argv, ZContext* ctx) {
     static const struct option long_opts[] = {
-        {"recurse-paths", no_argument, NULL, 'r'},
-        {"test", no_argument, NULL, 'T'},
-        {"quiet", no_argument, NULL, 'q'},
-        {"verbose", no_argument, NULL, 'v'},
-        {"help", no_argument, NULL, 'h'},
-        {NULL, 0, NULL, 0},
+        {"recurse-paths", no_argument, NULL, 'r'}, {"test", no_argument, NULL, 'T'},           {"quiet", no_argument, NULL, 'q'}, {"verbose", no_argument, NULL, 'v'},
+        {"encrypt", no_argument, NULL, 'e'},       {"password", required_argument, NULL, 'P'}, {"help", no_argument, NULL, 'h'},  {NULL, 0, NULL, 0},
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "rjTqvmdfui:x:0123456789h", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "rjTqvmdfui:x:0123456789heP:", long_opts, NULL)) != -1) {
         switch (opt) {
             case 'r':
                 ctx->recursive = true;
@@ -89,6 +91,15 @@ static int parse_zip_args(int argc, char **argv, ZContext *ctx) {
                 break;
             case 'v':
                 ctx->verbose = true;
+                break;
+            case 'e':
+                ctx->encrypt = true;
+                break;
+            case 'P':
+                free(ctx->password);
+                ctx->password = strdup(optarg);
+                if (!ctx->password)
+                    return ZU_STATUS_OOM;
                 break;
             case 'i':
                 if (zu_strlist_push(&ctx->include, optarg) != 0)
@@ -138,12 +149,27 @@ static int parse_zip_args(int argc, char **argv, ZContext *ctx) {
     return ZU_STATUS_OK;
 }
 
-int main(int argc, char **argv) {
-    ZContext *ctx = zu_context_create();
+int main(int argc, char** argv) {
+    ZContext* ctx = zu_context_create();
     if (!ctx) {
         fprintf(stderr, "zip: failed to allocate context\n");
         return ZU_STATUS_OOM;
     }
+
+    // Default behavior for 'zip' is to modify/update existing archives
+    ctx->modify_archive = true;
+
+    if (is_alias(argv[0], "zipcloak")) {
+        ctx->encrypt = true;
+        ctx->modify_archive = true;
+        // zipcloak implies no recursion/store flags, usually just modifying
+    }
+    else if (is_alias(argv[0], "zipsplit")) {
+        fprintf(stderr, "%s: functionality not yet implemented\n", argv[0]);
+        zu_context_free(ctx);
+        return 1;
+    }
+    bool is_zipnote = is_alias(argv[0], "zipnote");
 
     int parse_rc = parse_zip_args(argc, argv, ctx);
     if (parse_rc == ZU_STATUS_USAGE) {
@@ -156,7 +182,44 @@ int main(int argc, char **argv) {
         return map_exit_code(parse_rc);
     }
 
-    int exec_rc = zu_zip_run(ctx);
+    if (ctx->encrypt && !ctx->password) {
+        char* pass = getpass("Enter password: ");
+        if (!pass) {
+            fprintf(stderr, "zip: password required\n");
+            zu_context_free(ctx);
+            return 1;
+        }
+        char* verify = getpass("Verify password: ");
+        if (!verify || strcmp(pass, verify) != 0) {
+            fprintf(stderr, "zip: password verification failed\n");
+            zu_context_free(ctx);
+            return 1;
+        }
+        ctx->password = strdup(pass);
+        if (!ctx->password) {
+            zu_context_free(ctx);
+            return ZU_STATUS_OOM;
+        }
+    }
+
+    int exec_rc;
+    if (is_zipnote) {
+        ctx->zipinfo_mode = true;
+        ctx->zi_show_comments = true;
+        ctx->list_only = true;
+        // zipnote typically outputs "Name=..." lines if used for editing,
+        // but just dumping comments (like unzip -z but per file) is a reasonable default
+        // for "minizip functionality" when -w is not supported.
+        exec_rc = zu_list_archive(ctx);
+    }
+    else {
+        exec_rc = zu_zip_run(ctx);
+    }
+
+    if (exec_rc != ZU_STATUS_OK && ctx->error_msg[0] != '\0') {
+        fprintf(stderr, "zip: %s\n", ctx->error_msg);
+    }
+
     zu_context_free(ctx);
     return map_exit_code(exec_rc);
 }

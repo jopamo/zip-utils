@@ -6,7 +6,7 @@
 
 #include "ziputils.h"
 
-int zu_deflate_buffer(const uint8_t *input, size_t input_len, int level, uint8_t **out_buf, size_t *out_len);
-int zu_inflate_buffer(const uint8_t *input, size_t input_len, uint8_t **out_buf, size_t *out_len);
+int zu_deflate_buffer(const uint8_t* input, size_t input_len, int level, uint8_t** out_buf, size_t* out_len);
+int zu_inflate_buffer(const uint8_t* input, size_t input_len, uint8_t** out_buf, size_t* out_len);
 
 #endif

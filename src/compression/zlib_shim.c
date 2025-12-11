@@ -4,7 +4,7 @@
 #include <string.h>
 #include <zlib.h>
 
-static int alloc_out(uint8_t **out_buf, size_t *out_len, size_t hint) {
+static int alloc_out(uint8_t** out_buf, size_t* out_len, size_t hint) {
     if (!out_buf || !out_len) {
         return ZU_STATUS_USAGE;
     }
@@ -16,7 +16,7 @@ static int alloc_out(uint8_t **out_buf, size_t *out_len, size_t hint) {
     return ZU_STATUS_OK;
 }
 
-int zu_deflate_buffer(const uint8_t *input, size_t input_len, int level, uint8_t **out_buf, size_t *out_len) {
+int zu_deflate_buffer(const uint8_t* input, size_t input_len, int level, uint8_t** out_buf, size_t* out_len) {
     if (!input || !out_buf || !out_len) {
         return ZU_STATUS_USAGE;
     }
@@ -27,7 +27,7 @@ int zu_deflate_buffer(const uint8_t *input, size_t input_len, int level, uint8_t
     /* Raw deflate stream (no zlib header) to match ZIP requirements. */
     z_stream strm;
     memset(&strm, 0, sizeof(strm));
-    strm.next_in = (Bytef *)input;
+    strm.next_in = (Bytef*)input;
     strm.avail_in = (uInt)input_len;
 
     int zrc = deflateInit2(&strm, level, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY);
@@ -59,7 +59,7 @@ int zu_deflate_buffer(const uint8_t *input, size_t input_len, int level, uint8_t
     return ZU_STATUS_OK;
 }
 
-int zu_inflate_buffer(const uint8_t *input, size_t input_len, uint8_t **out_buf, size_t *out_len) {
+int zu_inflate_buffer(const uint8_t* input, size_t input_len, uint8_t** out_buf, size_t* out_len) {
     if (!input || !out_buf || !out_len) {
         return ZU_STATUS_USAGE;
     }
@@ -78,7 +78,7 @@ int zu_inflate_buffer(const uint8_t *input, size_t input_len, uint8_t **out_buf,
 
         z_stream strm;
         memset(&strm, 0, sizeof(strm));
-        strm.next_in = (Bytef *)input;
+        strm.next_in = (Bytef*)input;
         strm.avail_in = (uInt)input_len;
         strm.next_out = *out_buf;
         strm.avail_out = (uInt)*out_len;

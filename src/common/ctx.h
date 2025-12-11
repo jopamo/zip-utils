@@ -8,6 +8,7 @@
 
 #include "strlist.h"
 #include "ziputils.h"
+#include "zip_headers.h"
 
 enum {
     ZU_ZI_FMT_SHORT = 0,
@@ -17,12 +18,27 @@ enum {
     ZU_ZI_FMT_NAMES,
 };
 
+// Represents an entry found in an existing archive's central directory
+typedef struct {
+    zu_central_header hdr;
+    char* name;
+    unsigned char* extra;
+    uint16_t extra_len;
+    char* comment;
+    uint16_t comment_len;
+    uint64_t comp_size;
+    uint64_t uncomp_size;
+    uint64_t lho_offset;
+    bool delete;  /* Marked for deletion */
+    bool changed; /* Is new or modified version */
+} zu_existing_entry;
+
 struct ZContext {
     /* I/O */
-    FILE *in_file;
-    FILE *out_file;
+    FILE* in_file;
+    FILE* out_file;
     uint64_t current_offset;
-    uint8_t *io_buffer;
+    uint8_t* io_buffer;
     size_t io_buffer_size;
 
     /* Configuration */
@@ -53,20 +69,29 @@ struct ZContext {
     bool zi_allow_pager;
     bool zi_show_comments;
     int zi_format; /* enum-like selector for zipinfo output style */
-    char *zip_comment;
+    char* zip_comment;
     size_t zip_comment_len;
-    const char *archive_path;
-    const char *target_dir;
+    const char* archive_path;
+    const char* target_dir;
     ZU_StrList include;
     ZU_StrList exclude;
+
+    // Modification specific flags
+    bool modify_archive;
+    ZU_StrList existing_entries;  // List of zu_existing_entry
+    bool sort_entries;            // Whether to sort entries in the central directory
+
+    /* Encryption */
+    bool encrypt;
+    char* password;
 
     /* Error reporting */
     int last_error;
     char error_msg[256];
 };
 
-ZContext *zu_context_create(void);
-void zu_context_free(ZContext *ctx);
-void zu_context_set_error(ZContext *ctx, int status, const char *msg);
+ZContext* zu_context_create(void);
+void zu_context_free(ZContext* ctx);
+void zu_context_set_error(ZContext* ctx, int status, const char* msg);
 
 #endif

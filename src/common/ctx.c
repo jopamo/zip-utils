@@ -4,8 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-ZContext *zu_context_create(void) {
-    ZContext *ctx = calloc(1, sizeof(ZContext));
+ZContext* zu_context_create(void) {
+    ZContext* ctx = calloc(1, sizeof(ZContext));
     if (!ctx) {
         return NULL;
     }
@@ -32,11 +32,21 @@ ZContext *zu_context_create(void) {
 
     zu_strlist_init(&ctx->include);
     zu_strlist_init(&ctx->exclude);
+    zu_strlist_init(&ctx->existing_entries);
 
     return ctx;
 }
 
-void zu_context_free(ZContext *ctx) {
+static void zu_existing_entry_free(void* data) {
+    zu_existing_entry* entry = (zu_existing_entry*)data;
+    if (entry) {
+        free(entry->name);
+        free(entry->extra);
+        free(entry->comment);
+    }
+}
+
+void zu_context_free(ZContext* ctx) {
     if (!ctx) {
         return;
     }
@@ -44,12 +54,13 @@ void zu_context_free(ZContext *ctx) {
     zu_close_files(ctx);
     zu_strlist_free(&ctx->include);
     zu_strlist_free(&ctx->exclude);
+    zu_strlist_free_with_dtor(&ctx->existing_entries, zu_existing_entry_free);
     free(ctx->io_buffer);
     free(ctx->zip_comment);
     free(ctx);
 }
 
-void zu_context_set_error(ZContext *ctx, int status, const char *msg) {
+void zu_context_set_error(ZContext* ctx, int status, const char* msg) {
     if (!ctx) {
         return;
     }
@@ -57,7 +68,8 @@ void zu_context_set_error(ZContext *ctx, int status, const char *msg) {
     if (msg) {
         strncpy(ctx->error_msg, msg, sizeof(ctx->error_msg) - 1);
         ctx->error_msg[sizeof(ctx->error_msg) - 1] = '\0';
-    } else {
+    }
+    else {
         ctx->error_msg[0] = '\0';
     }
 }
