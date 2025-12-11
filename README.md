@@ -4,7 +4,7 @@
 
 # ZIP Utils
 
-...
+This is a rewrite of zip, unzip, and helpers...
 
 ---
 

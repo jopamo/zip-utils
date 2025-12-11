@@ -5,11 +5,32 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <time.h>
 
 #include "ctx.h"
 #include "ops.h"
 #include "ziputils.h"
 #include "reader.h"
+
+static time_t parse_date(const char* str) {
+    struct tm tm = {0};
+    // Initialize tm to avoid garbage
+    tm.tm_isdst = -1;
+
+    // Try ISO 8601: yyyy-mm-dd
+    if (strptime(str, "%Y-%m-%d", &tm)) {
+        return mktime(&tm);
+    }
+
+    // Try mmddyyyy
+    memset(&tm, 0, sizeof(tm));
+    tm.tm_isdst = -1;
+    if (strptime(str, "%m%d%Y", &tm)) {
+        return mktime(&tm);
+    }
+
+    return (time_t)-1;
+}
 
 static bool is_alias(const char* argv0, const char* name) {
     const char* base = strrchr(argv0, '/');
@@ -58,12 +79,15 @@ static void print_usage(FILE* to, const char* argv0) {
 
 static int parse_zip_args(int argc, char** argv, ZContext* ctx) {
     static const struct option long_opts[] = {
-        {"recurse-paths", no_argument, NULL, 'r'}, {"test", no_argument, NULL, 'T'},           {"quiet", no_argument, NULL, 'q'}, {"verbose", no_argument, NULL, 'v'},
-        {"encrypt", no_argument, NULL, 'e'},       {"password", required_argument, NULL, 'P'}, {"help", no_argument, NULL, 'h'},  {NULL, 0, NULL, 0},
+        {"recurse-paths", no_argument, NULL, 'r'}, {"test", no_argument, NULL, 'T'},           {"quiet", no_argument, NULL, 'q'},     {"verbose", no_argument, NULL, 'v'},
+        {"encrypt", no_argument, NULL, 'e'},       {"password", required_argument, NULL, 'P'}, {"help", no_argument, NULL, 'h'},      {"output-file", required_argument, NULL, 'O'},
+        {"la", no_argument, NULL, 1001},           {"log-append", no_argument, NULL, 1001},    {"lf", required_argument, NULL, 1002}, {"logfile-path", required_argument, NULL, 1002},
+        {"li", no_argument, NULL, 1003},           {"log-info", no_argument, NULL, 1003},      {"tt", required_argument, NULL, 1004}, {NULL, 0, NULL, 0},
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "rjTqvmdfui:x:0123456789heP:", long_opts, NULL)) != -1) {
+    // Added O, t to short opts
+    while ((opt = getopt_long_only(argc, argv, "rjTqvmdfui:x:0123456789heP:O:t:", long_opts, NULL)) != -1) {
         switch (opt) {
             case 'r':
                 ctx->recursive = true;
@@ -100,6 +124,37 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx) {
                 ctx->password = strdup(optarg);
                 if (!ctx->password)
                     return ZU_STATUS_OOM;
+                break;
+            case 'O':
+                ctx->output_path = optarg;
+                break;
+            case 't':  // -t mmddyyyy (after)
+                ctx->filter_after = parse_date(optarg);
+                if (ctx->filter_after == (time_t)-1) {
+                    fprintf(stderr, "zip: invalid date format for -t: %s\n", optarg);
+                    return ZU_STATUS_USAGE;
+                }
+                ctx->has_filter_after = true;
+                break;
+            case 1004:  // -tt mmddyyyy (before)
+                ctx->filter_before = parse_date(optarg);
+                if (ctx->filter_before == (time_t)-1) {
+                    fprintf(stderr, "zip: invalid date format for -tt: %s\n", optarg);
+                    return ZU_STATUS_USAGE;
+                }
+                ctx->has_filter_before = true;
+                break;
+            case 1001:  // -la
+                ctx->log_append = true;
+                break;
+            case 1002:  // -lf
+                free(ctx->log_path);
+                ctx->log_path = strdup(optarg);
+                if (!ctx->log_path)
+                    return ZU_STATUS_OOM;
+                break;
+            case 1003:  // -li
+                ctx->log_info = true;
                 break;
             case 'i':
                 if (zu_strlist_push(&ctx->include, optarg) != 0)
@@ -180,6 +235,15 @@ int main(int argc, char** argv) {
         fprintf(stderr, "zip: argument parsing failed (%s)\n", zu_status_str(parse_rc));
         zu_context_free(ctx);
         return map_exit_code(parse_rc);
+    }
+
+    if (ctx->log_path) {
+        ctx->log_file = fopen(ctx->log_path, ctx->log_append ? "ab" : "wb");
+        if (!ctx->log_file) {
+            fprintf(stderr, "zip: could not open log file '%s'\n", ctx->log_path);
+            zu_context_free(ctx);
+            return ZU_STATUS_IO;
+        }
     }
 
     if (ctx->encrypt && !ctx->password) {

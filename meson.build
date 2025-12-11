@@ -153,6 +153,30 @@ test('integration-create', python3,
   timeout: 30
 )
 
+test('integration-logging', python3,
+  args: [meson.project_source_root() / 'tests/test_logging.py'],
+  env: {
+    'WRITE_BIN': zip_exe.full_path()
+  },
+  timeout: 30
+)
+
+test('integration-time-filtering', python3,
+  args: [meson.project_source_root() / 'tests/test_time_filtering.py'],
+  env: {
+    'WRITE_BIN': zip_exe.full_path()
+  },
+  timeout: 30
+)
+
+test('integration-output-copy', python3,
+  args: [meson.project_source_root() / 'tests/test_output_copy.py'],
+  env: {
+    'WRITE_BIN': zip_exe.full_path()
+  },
+  timeout: 30
+)
+
 test('integration-unzip', python3,
   args: [meson.project_source_root() / 'tests/test_unzip_integration.py'],
   env: {

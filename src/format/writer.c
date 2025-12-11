@@ -629,32 +629,23 @@ int zu_modify_archive(ZContext* ctx) {
 
     /* 3. Open Output */
     char* temp_path = NULL;
+    const char* target_path = ctx->output_path ? ctx->output_path : ctx->archive_path;
     FILE* out = NULL;
     if (ctx->output_to_stdout) {
         out = stdout;
     }
     else {
-        /* If we have an existing archive, we write to a temp file. */
-        if (existing_loaded) {
-            /* Create temp file */
-            int len = strlen(ctx->archive_path) + 10;
-            temp_path = malloc(len);
-            snprintf(temp_path, len, "%s.tmp", ctx->archive_path);
-            out = fopen(temp_path, "wb");
-            if (!out) {
-                zu_context_set_error(ctx, ZU_STATUS_IO, "create temp file failed");
-                free(temp_path);
-                return ZU_STATUS_IO;
-            }
-            ctx->out_file = out;
+        /* Create temp file next to target path */
+        int len = strlen(target_path) + 10;
+        temp_path = malloc(len);
+        snprintf(temp_path, len, "%s.tmp", target_path);
+        out = fopen(temp_path, "wb");
+        if (!out) {
+            zu_context_set_error(ctx, ZU_STATUS_IO, "create temp file failed");
+            free(temp_path);
+            return ZU_STATUS_IO;
         }
-        else {
-            /* New archive */
-            zu_open_output(ctx, ctx->archive_path, "wb");
-            out = ctx->out_file;
-            if (!out)
-                return ZU_STATUS_IO;
-        }
+        ctx->out_file = out;
     }
 
     zu_entry_list entries = {0};
@@ -691,6 +682,18 @@ int zu_modify_archive(ZContext* ctx) {
                 goto cleanup;
             }
 
+            /* Time Filtering */
+            if (ctx->has_filter_after && info.st.st_mtime < ctx->filter_after) {
+                if (ctx->verbose || ctx->log_info)
+                    zu_log(ctx, "skipping %s (older than -t)\n", path);
+                continue;
+            }
+            if (ctx->has_filter_before && info.st.st_mtime >= ctx->filter_before) {
+                if (ctx->verbose || ctx->log_info)
+                    zu_log(ctx, "skipping %s (newer than -tt)\n", path);
+                continue;
+            }
+
             if (existing) {
                 if (ctx->freshen || ctx->update) {
                     /* Compare times */
@@ -705,11 +708,15 @@ int zu_modify_archive(ZContext* ctx) {
 
                     if (!input_newer) {
                         /* Input is older or same, skip it. Keep existing. */
+                        if (ctx->verbose || ctx->log_info)
+                            zu_log(ctx, "skipping %s (not newer)\n", path);
                         continue;
                     }
                 }
                 /* We are replacing existing. Mark it for deletion. */
                 existing->delete = true;
+                if (ctx->verbose || ctx->log_info)
+                    zu_log(ctx, "updating: %s\n", stored);
             }
             else {
                 /* New file */
@@ -717,6 +724,8 @@ int zu_modify_archive(ZContext* ctx) {
                     /* Freshen only updates existing. Skip new. */
                     continue;
                 }
+                if (ctx->verbose || ctx->log_info)
+                    zu_log(ctx, "adding: %s\n", stored);
             }
 
             /* Proceed to write this file */
@@ -910,14 +919,17 @@ cleanup:
     ctx->in_file = NULL;
 
     if (rc == ZU_STATUS_OK && temp_path) {
-        if (rename(temp_path, ctx->archive_path) != 0) {
+        if (rename(temp_path, target_path) != 0) {
             zu_context_set_error(ctx, ZU_STATUS_IO, "rename temp file failed");
+
             rc = ZU_STATUS_IO;
         }
     }
+
     else if (temp_path) {
         unlink(temp_path);
     }
+
     free(temp_path);
 
     return rc;

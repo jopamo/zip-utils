@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <time.h>
 
 #include "strlist.h"
 #include "ziputils.h"
@@ -81,6 +82,19 @@ struct ZContext {
     ZU_StrList existing_entries;  // List of zu_existing_entry
     bool sort_entries;            // Whether to sort entries in the central directory
 
+    /* Output/Logging */
+    const char* output_path; /* -O */
+    char* log_path;          /* -lf */
+    bool log_append;         /* -la */
+    bool log_info;           /* -li */
+    FILE* log_file;          /* Handle for log file */
+
+    /* Filtering */
+    time_t filter_after; /* -t */
+    bool has_filter_after;
+    time_t filter_before; /* -tt */
+    bool has_filter_before;
+
     /* Encryption */
     bool encrypt;
     char* password;
@@ -93,5 +107,6 @@ struct ZContext {
 ZContext* zu_context_create(void);
 void zu_context_free(ZContext* ctx);
 void zu_context_set_error(ZContext* ctx, int status, const char* msg);
+void zu_log(ZContext* ctx, const char* fmt, ...);
 
 #endif

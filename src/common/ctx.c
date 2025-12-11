@@ -30,6 +30,14 @@ ZContext* zu_context_create(void) {
     ctx->zip_comment = NULL;
     ctx->zip_comment_len = 0;
 
+    ctx->output_path = NULL;
+    ctx->log_path = NULL;
+    ctx->log_file = NULL;
+    ctx->log_append = false;
+    ctx->log_info = false;
+    ctx->has_filter_after = false;
+    ctx->has_filter_before = false;
+
     zu_strlist_init(&ctx->include);
     zu_strlist_init(&ctx->exclude);
     zu_strlist_init(&ctx->existing_entries);
@@ -52,6 +60,12 @@ void zu_context_free(ZContext* ctx) {
     }
 
     zu_close_files(ctx);
+    if (ctx->log_file) {
+        fclose(ctx->log_file);
+        ctx->log_file = NULL;
+    }
+    free(ctx->log_path);
+
     zu_strlist_free(&ctx->include);
     zu_strlist_free(&ctx->exclude);
     zu_strlist_free_with_dtor(&ctx->existing_entries, zu_existing_entry_free);
