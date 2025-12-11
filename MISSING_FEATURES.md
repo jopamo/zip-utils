@@ -53,6 +53,6 @@ See `OPTION_MATRIX.md` for a per-option breakdown.
 - [x] Streaming output/input without known sizes (data descriptors) for stdin/stdout writes.
 
 ## Priority Backlog
-1. Add remaining parsed behaviors (`-q` levels, pager), then wire unparsed options in priority order.
-2. Surface entry comment editing (zipnote-style flows) and align with Info-ZIP prompts.
-3. Broaden platform/attribute handling (text/binary toggles, Unicode/codepage flags).
+1. Surface entry comment editing (zipnote-style flows) and align with Info-ZIP prompts.
+2. Broaden platform/attribute handling (text/binary toggles, Unicode/codepage flags).
+3. Improve zipinfo formatting parity (header/footer suppression combos, pager/header spacing).

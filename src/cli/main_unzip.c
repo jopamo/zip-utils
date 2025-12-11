@@ -28,7 +28,7 @@ static void print_usage(FILE* to, const char* argv0) {
             "  -t                    Test archive integrity (zipinfo: show totals footer)\n"
             "  -d DIR                Extract into DIR\n"
             "  -o / -n               Overwrite / never overwrite\n"
-            "  -q / -v               Quiet / verbose output\n"
+            "  -q / -qq / -v         Quiet / really quiet / verbose output\n"
             "  -x pattern            Exclude pattern (can repeat)\n"
             "  -i pattern            Include only matching pattern\n"
             "  -C                    Case-insensitive pattern matching\n"
@@ -114,7 +114,9 @@ static int parse_unzip_args(int argc, char** argv, ZContext* ctx) {
                 ctx->overwrite = false;
                 break;
             case 'q':
-                ctx->quiet = true;
+                ctx->quiet_level++;
+                ctx->quiet = ctx->quiet_level > 0;
+                ctx->verbose = false;
                 break;
             case 'v':
                 ctx->verbose = true;

@@ -52,6 +52,7 @@ struct ZContext {
     bool remove_source;
     bool test_integrity;
     bool quiet;
+    int quiet_level;
     bool verbose;
     bool difference_mode;
     bool freshen;

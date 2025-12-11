@@ -17,6 +17,7 @@ ZContext* zu_context_create(void) {
     ctx->last_error = ZU_STATUS_OK;
     ctx->io_buffer_size = 0;
     ctx->io_buffer = NULL;
+    ctx->quiet_level = 0;
     ctx->zipinfo_mode = false;
     ctx->zi_format = ZU_ZI_FMT_SHORT;
     ctx->zi_header = true;

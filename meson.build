@@ -172,6 +172,15 @@ test('integration-logging', python3,
   timeout: 30
 )
 
+test('integration-quiet-pager', python3,
+  args: [meson.project_source_root() / 'tests/test_quiet_pager.py'],
+  env: {
+    'WRITE_BIN': zip_exe.full_path(),
+    'UNZIP_BIN': unzip_exe.full_path()
+  },
+  timeout: 30
+)
+
 test('integration-split-read', python3,
   args: [meson.project_source_root() / 'tests/test_split_read.py'],
   env: {

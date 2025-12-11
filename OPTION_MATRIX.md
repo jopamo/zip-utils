@@ -26,7 +26,7 @@ Derived from `zip.txt` and `unzip.txt`. Status values:
 | `-f`, `-u`, `-FS` | working | Freshen/update/file sync implemented. |
 | `-m` | working | Moves inputs by deleting source files after successful write. |
 | `-T` | partial | Tests after write; exit-code parity not fully validated. |
-| `-q`, `-v` | working | Verbosity toggles (progress dots differ from man page). |
+| `-q`, `-qq`, `-v` | working | Quiet levels (0/1/2) suppress listings; progress dots differ from man page. |
 | `-x`, `-i` | working | Include/exclude globs; must-match precedence (`-MM`) not implemented. |
 | `-e`, `-P` | working | ZipCrypto only. |
 | `-O` | working | Copy-on-write output path. |
@@ -85,7 +85,7 @@ Derived from `zip.txt` and `unzip.txt`. Status values:
 | `-i`, `-x`, `-C` | working | Include/exclude; case-insensitive matching (no toggle back). |
 | `-v` | working | Verbose listing; routes to zipinfo mode. |
 | `-Z` | working | Enter zipinfo mode. |
-| `-1`, `-2`, `-s`, `-m`, `-h`, `-T`, `-z`, `-M` (zipinfo) | partial | Names-only/short/medium/header/footer/decimal time/comments/pager; formatting/pager parity not fully validated. |
+| `-1`, `-2`, `-s`, `-m`, `-h`, `-T`, `-z`, `-M` (zipinfo) | partial | Names-only/short/medium/header/footer/decimal time/comments/pager supported; formatting parity still pending. |
 | Multi-disk read | working | Opens `.z01` + `.zip` split archives by concatenating parts. |
 | Symlink/FIFO | missing | Rejected; no allow flag. |
 | `-A` | missing | DLL API help. |
@@ -112,11 +112,11 @@ Derived from `zip.txt` and `unzip.txt`. Status values:
 | `-W` | missing | Wild_stop_at_dir matching. |
 | `-X` | missing | Restore owner/protection/ACLs. |
 | `-Y` | missing | Treat `.nnn` suffix as VMS version. |
-| `-q` double (`-qq`) | partial | Quiet is boolean only; extra quiet level ignored. |
+| `-q` / `-qq` | working | Quiet levels (0/1/2) suppress listings; still print errors. |
 | `zipinfo` formats (`-l`/`-v`/`-h` combos) | partial | Layouts supported; header/footer suppression needs parity review. |
 | Long-option aliases/negations | partial | Only wired for implemented short options. |
 
 ## Priority Backlog
-1. Add remaining parsed behaviors (`-q` levels, pager), then wire unparsed options in priority order.
-2. Surface entry comment editing (zipnote-style flows) and align with Info-ZIP prompts.
-3. Broaden platform/attribute handling (text/binary toggles, Unicode/codepage flags).
+1. Surface entry comment editing (zipnote-style flows) and align with Info-ZIP prompts.
+2. Broaden platform/attribute handling (text/binary toggles, Unicode/codepage flags).
+3. Improve zipinfo formatting parity (header/footer suppression combos, pager/header spacing).

@@ -153,7 +153,7 @@ static void print_usage(FILE* to, const char* argv0) {
             "  -f                    Freshen: replace existing entries\n"
             "  -FS                   File Sync: update and delete missing\n"
             "  -T                    Test archive after writing\n"
-            "  -q / -v               Quiet / verbose output\n"
+            "  -q / -qq / -v         Quiet / really quiet / verbose output\n"
             "  -x pattern            Exclude pattern (can repeat)\n"
             "  -i pattern            Include pattern (can repeat)\n"
             "  -0 .. -9              Compression level\n"
@@ -235,7 +235,9 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx) {
                 ctx->test_integrity = true;
                 break;
             case 'q':
-                ctx->quiet = true;
+                ctx->quiet_level++;
+                ctx->quiet = ctx->quiet_level > 0;
+                ctx->verbose = false;
                 break;
             case 'v':
                 ctx->verbose = true;
