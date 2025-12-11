@@ -33,7 +33,7 @@ Derived from `zip.txt` and `unzip.txt`. Status values:
 | `-s`, `-sp` | working | Split write and pause; reader opens `.z01` + `.zip` concatenated splits (disk metadata simplified). |
 | `-t`, `-tt` | working | Time filters. |
 | `-F`, `-FF` | partial | Fix/fixfix implemented; recovery semantics need validation. |
-| `zipnote` alias | partial | Lists comments only; no edit/write. |
+| `zipnote` alias | working | Lists comments; `-w` applies entry/archive comment edits (zipnote-style format). |
 | `zipcloak` alias | partial | Enables encryption on new writes; no re-encrypt of existing entries. |
 | `zipsplit` alias | missing | Alias only. |
 | Logging `-la/-lf/-li` | working | Project-specific (not in man page). |
@@ -117,6 +117,6 @@ Derived from `zip.txt` and `unzip.txt`. Status values:
 | Long-option aliases/negations | partial | Only wired for implemented short options. |
 
 ## Priority Backlog
-1. Surface entry comment editing (zipnote-style flows) and align with Info-ZIP prompts.
-2. Broaden platform/attribute handling (text/binary toggles, Unicode/codepage flags).
-3. Improve zipinfo formatting parity (header/footer suppression combos, pager/header spacing).
+1. Broaden platform/attribute handling (text/binary toggles, Unicode/codepage flags).
+2. Improve zipinfo formatting parity (header/footer suppression combos, pager/header spacing).
+3. Add remaining parsed behaviors and flags in priority order.

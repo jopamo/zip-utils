@@ -86,6 +86,271 @@ static int map_exit_code(int status) {
     }
 }
 
+static const char* zipnote_archive_label = "(zip file comment below this line)";
+
+static void zipnote_emit_comment(const char* data, size_t len) {
+    if (!data || len == 0) {
+        printf("\n");
+        return;
+    }
+    size_t i = 0;
+    while (i < len) {
+        size_t line_end = i;
+        while (line_end < len && data[line_end] != '\n')
+            line_end++;
+        size_t line_len = line_end - i;
+        if (line_len > 0 && data[i] == '@')
+            putchar('@');
+        fwrite(data + i, 1, line_len, stdout);
+        putchar('\n');
+        i = line_end + 1;
+    }
+}
+
+static int zipnote_list(ZContext* ctx) {
+    int rc = zu_load_central_directory(ctx);
+    if (rc != ZU_STATUS_OK) {
+        return rc;
+    }
+
+    for (size_t i = 0; i < ctx->existing_entries.len; ++i) {
+        zu_existing_entry* e = (zu_existing_entry*)ctx->existing_entries.items[i];
+        printf("@ %s\n", e->name);
+        zipnote_emit_comment(e->comment, e->comment_len);
+        printf("@\n");
+    }
+
+    printf("@ %s\n", zipnote_archive_label);
+    zipnote_emit_comment(ctx->zip_comment, ctx->zip_comment_len);
+    printf("@\n");
+
+    return ZU_STATUS_OK;
+}
+
+typedef struct {
+    char* name;
+    char* comment;
+    size_t comment_len;
+    bool is_archive;
+} zipnote_edit;
+
+static void zipnote_edit_free(zipnote_edit* e) {
+    if (!e)
+        return;
+    free(e->name);
+    free(e->comment);
+    free(e);
+}
+
+static int zipnote_add_edit(zipnote_edit*** edits, size_t* len, size_t* cap, zipnote_edit* e) {
+    if (*len == *cap) {
+        size_t new_cap = *cap == 0 ? 8 : *cap * 2;
+        zipnote_edit** np = realloc(*edits, new_cap * sizeof(zipnote_edit*));
+        if (!np)
+            return ZU_STATUS_OOM;
+        *edits = np;
+        *cap = new_cap;
+    }
+    (*edits)[(*len)++] = e;
+    return ZU_STATUS_OK;
+}
+
+static int zipnote_parse(ZContext* ctx, zipnote_edit*** edits_out, size_t* edits_len_out) {
+    (void)ctx;
+    char* line = NULL;
+    size_t line_cap = 0;
+    ssize_t got;
+    zipnote_edit** edits = NULL;
+    size_t edits_len = 0, edits_cap = 0;
+
+    char* cur_name = NULL;
+    char* comment_buf = NULL;
+    size_t comment_len = 0, comment_cap = 0;
+
+    while ((got = getline(&line, &line_cap, stdin)) != -1) {
+        if (got > 0 && line[got - 1] == '\n') {
+            line[got - 1] = '\0';
+            got--;
+        }
+
+        if (line[0] == '@' && line[1] != '@') {
+            if (cur_name) {
+                zipnote_edit* e = calloc(1, sizeof(zipnote_edit));
+                if (!e) {
+                    free(line);
+                    free(comment_buf);
+                    free(cur_name);
+                    for (size_t i = 0; i < edits_len; ++i)
+                        zipnote_edit_free(edits[i]);
+                    free(edits);
+                    return ZU_STATUS_OOM;
+                }
+                e->name = cur_name;
+                e->comment = comment_buf;
+                e->comment_len = comment_len;
+                e->is_archive = (strcmp(cur_name, zipnote_archive_label) == 0);
+                int add_rc = zipnote_add_edit(&edits, &edits_len, &edits_cap, e);
+                if (add_rc != ZU_STATUS_OK) {
+                    zipnote_edit_free(e);
+                    free(line);
+                    for (size_t i = 0; i < edits_len; ++i)
+                        zipnote_edit_free(edits[i]);
+                    free(edits);
+                    return add_rc;
+                }
+                cur_name = NULL;
+                comment_buf = NULL;
+                comment_len = 0;
+                comment_cap = 0;
+            }
+
+            const char* name = line + 1;
+            while (*name == ' ')
+                name++;
+            if (*name == '\0') {
+                free(cur_name);
+                cur_name = NULL;
+                continue;
+            }
+            cur_name = strdup(name);
+            comment_len = 0;
+            comment_cap = 0;
+            free(comment_buf);
+            comment_buf = NULL;
+            continue;
+        }
+
+        const char* data = line;
+        size_t data_len = (size_t)got;
+        if (line[0] == '@' && line[1] == '@') {
+            data = line + 1;
+            data_len -= 1;
+        }
+
+        if (!cur_name) {
+            continue;
+        }
+
+        if (comment_len + data_len + 1 > comment_cap) {
+            size_t new_cap = comment_cap == 0 ? 256 : comment_cap * 2;
+            while (new_cap < comment_len + data_len + 1)
+                new_cap *= 2;
+            char* nb = realloc(comment_buf, new_cap);
+            if (!nb) {
+                free(line);
+                free(comment_buf);
+                free(cur_name);
+                for (size_t i = 0; i < edits_len; ++i)
+                    zipnote_edit_free(edits[i]);
+                free(edits);
+                return ZU_STATUS_OOM;
+            }
+            comment_buf = nb;
+            comment_cap = new_cap;
+        }
+        memcpy(comment_buf + comment_len, data, data_len);
+        comment_len += data_len;
+        comment_buf[comment_len++] = '\n';
+    }
+
+    if (cur_name) {
+        zipnote_edit* e = calloc(1, sizeof(zipnote_edit));
+        if (!e) {
+            free(line);
+            free(comment_buf);
+            free(cur_name);
+            for (size_t i = 0; i < edits_len; ++i)
+                zipnote_edit_free(edits[i]);
+            free(edits);
+            return ZU_STATUS_OOM;
+        }
+        e->name = cur_name;
+        e->comment = comment_buf;
+        e->comment_len = comment_len;
+        e->is_archive = (strcmp(cur_name, zipnote_archive_label) == 0);
+        int add_rc = zipnote_add_edit(&edits, &edits_len, &edits_cap, e);
+        if (add_rc != ZU_STATUS_OK) {
+            zipnote_edit_free(e);
+            free(line);
+            for (size_t i = 0; i < edits_len; ++i)
+                zipnote_edit_free(edits[i]);
+            free(edits);
+            return add_rc;
+        }
+        cur_name = NULL;
+        comment_buf = NULL;
+        comment_len = 0;
+        comment_cap = 0;
+    }
+
+    free(line);
+    free(comment_buf);
+    free(cur_name);
+
+    *edits_out = edits;
+    *edits_len_out = edits_len;
+    return ZU_STATUS_OK;
+}
+
+static zu_existing_entry* zipnote_find_entry(ZContext* ctx, const char* name) {
+    for (size_t i = 0; i < ctx->existing_entries.len; ++i) {
+        zu_existing_entry* e = (zu_existing_entry*)ctx->existing_entries.items[i];
+        if (strcmp(e->name, name) == 0)
+            return e;
+    }
+    return NULL;
+}
+
+static int zipnote_apply(ZContext* ctx) {
+    int rc = zu_load_central_directory(ctx);
+    if (rc != ZU_STATUS_OK) {
+        return rc;
+    }
+
+    zipnote_edit** edits = NULL;
+    size_t edits_len = 0;
+    rc = zipnote_parse(ctx, &edits, &edits_len);
+    if (rc != ZU_STATUS_OK) {
+        return rc;
+    }
+
+    bool seen_archive = false;
+    for (size_t i = 0; i < edits_len; ++i) {
+        zipnote_edit* e = edits[i];
+        if (e->is_archive) {
+            free(ctx->zip_comment);
+            ctx->zip_comment = e->comment;
+            ctx->zip_comment_len = e->comment_len;
+            ctx->zip_comment_specified = true;
+            e->comment = NULL;
+            seen_archive = true;
+            continue;
+        }
+
+        zu_existing_entry* existing = zipnote_find_entry(ctx, e->name);
+        if (!existing) {
+            fprintf(stderr, "zipnote: warning: entry not found: %s\n", e->name);
+            continue;
+        }
+
+        free(existing->comment);
+        existing->comment = e->comment;
+        existing->comment_len = (uint16_t)e->comment_len;
+        e->comment = NULL;
+    }
+
+    if (!seen_archive) {
+        ctx->zip_comment_specified = false;
+    }
+
+    for (size_t i = 0; i < edits_len; ++i)
+        zipnote_edit_free(edits[i]);
+    free(edits);
+
+    ctx->existing_loaded = true;
+    return zu_modify_archive(ctx);
+}
+
 static int read_zip_comment(ZContext* ctx) {
     if (!ctx) {
         return ZU_STATUS_USAGE;
@@ -162,7 +427,7 @@ static void print_usage(FILE* to, const char* argv0) {
             argv0);
 }
 
-static int parse_zip_args(int argc, char** argv, ZContext* ctx) {
+static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote) {
     static const struct option long_opts[] = {
         {"recurse-paths", no_argument, NULL, 'r'}, {"test", no_argument, NULL, 'T'},
         {"quiet", no_argument, NULL, 'q'},         {"verbose", no_argument, NULL, 'v'},
@@ -180,7 +445,7 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx) {
 
     int opt;
     // Added O, t to short opts
-    while ((opt = getopt_long_only(argc, argv, "rjTqvmdfui:x:0123456789heP:O:t:Z:s:Fz", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long_only(argc, argv, "rjTqvmdfui:x:0123456789heP:O:t:Z:s:Fzw", long_opts, NULL)) != -1) {
         switch (opt) {
             case 'r':
                 ctx->recursive = true;
@@ -320,6 +585,13 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx) {
             case 'z':
                 ctx->zip_comment_specified = true;
                 break;
+            case 'w':
+                if (!is_zipnote) {
+                    print_usage(stderr, argv[0]);
+                    return ZU_STATUS_USAGE;
+                }
+                ctx->zipnote_write = true;
+                break;
             case 'h':
                 print_usage(stdout, argv[0]);
                 return ZU_STATUS_USAGE;
@@ -369,8 +641,11 @@ int main(int argc, char** argv) {
         return 1;
     }
     bool is_zipnote = is_alias(argv[0], "zipnote");
+    if (is_zipnote) {
+        ctx->zipnote_mode = true;
+    }
 
-    int parse_rc = parse_zip_args(argc, argv, ctx);
+    int parse_rc = parse_zip_args(argc, argv, ctx, is_zipnote);
     if (parse_rc == ZU_STATUS_USAGE) {
         zu_context_free(ctx);
         return 0;
@@ -379,6 +654,12 @@ int main(int argc, char** argv) {
         fprintf(stderr, "zip: argument parsing failed (%s)\n", zu_status_str(parse_rc));
         zu_context_free(ctx);
         return map_exit_code(parse_rc);
+    }
+
+    if (is_zipnote && ctx->zip_comment_specified) {
+        fprintf(stderr, "zipnote: -z is not supported with zipnote (use zip -z instead)\n");
+        zu_context_free(ctx);
+        return map_exit_code(ZU_STATUS_USAGE);
     }
 
     if (ctx->zip_comment_specified) {
@@ -433,14 +714,7 @@ int main(int argc, char** argv) {
 
     int exec_rc;
     if (is_zipnote) {
-        ctx->zipinfo_mode = true;
-        ctx->zi_show_comments = true;
-        ctx->zi_format = ZU_ZI_FMT_VERBOSE;
-        ctx->list_only = true;
-        // zipnote typically outputs "Name=..." lines if used for editing,
-        // but just dumping comments (like unzip -z but per file) is a reasonable default
-        // for "minizip functionality" when -w is not supported.
-        exec_rc = zu_list_archive(ctx);
+        exec_rc = ctx->zipnote_write ? zipnote_apply(ctx) : zipnote_list(ctx);
     }
     else {
         exec_rc = zu_zip_run(ctx);

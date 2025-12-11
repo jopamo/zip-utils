@@ -1435,6 +1435,8 @@ int zu_load_central_directory(ZContext* ctx) {
         return ZU_STATUS_USAGE;
     }
 
+    ctx->existing_loaded = false;
+
     int rc = zu_open_input(ctx, ctx->archive_path);
     if (rc != ZU_STATUS_OK) {
         return rc;
@@ -1528,10 +1530,6 @@ int zu_load_central_directory(ZContext* ctx) {
         ctx->existing_entries.items[ctx->existing_entries.len++] = (char*)entry;
     }
 
-    // Don't close files yet, as we might need to read data from them during modification?
-    // Actually, writer usually opens a new output file. If we modify in place, it's tricky.
-    // Standard `zip` writes to a temp file.
-    // We can keep `in_file` open for reading data to copy.
-
+    ctx->existing_loaded = true;
     return ZU_STATUS_OK;
 }

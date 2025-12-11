@@ -54,6 +54,9 @@ struct ZContext {
     bool quiet;
     int quiet_level;
     bool verbose;
+    bool zipnote_mode;
+    bool zipnote_write;
+    bool existing_loaded;
     bool difference_mode;
     bool freshen;
     bool update;

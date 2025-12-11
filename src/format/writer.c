@@ -1138,7 +1138,15 @@ int zu_modify_archive(ZContext* ctx) {
     bool existing_loaded = false;
     struct stat st;
     if (stat(ctx->archive_path, &st) == 0 && ctx->modify_archive) {
-        if (zu_load_central_directory(ctx) == ZU_STATUS_OK) {
+        if (ctx->existing_loaded) {
+            existing_loaded = true;
+            if (!ctx->in_file) {
+                if (zu_open_input(ctx, ctx->archive_path) != ZU_STATUS_OK) {
+                    return ZU_STATUS_IO;
+                }
+            }
+        }
+        else if (zu_load_central_directory(ctx) == ZU_STATUS_OK) {
             existing_loaded = true;
         }
     }

@@ -190,6 +190,15 @@ test('integration-split-read', python3,
   timeout: 60
 )
 
+test('integration-zipnote-edit', python3,
+  args: [meson.project_source_root() / 'tests/test_zipnote_edit.py'],
+  env: {
+    'WRITE_BIN': zip_exe.full_path(),
+    'ZIPNOTE_BIN': zip_exe.full_path()
+  },
+  timeout: 30
+)
+
 test('integration-time-filtering', python3,
   args: [meson.project_source_root() / 'tests/test_time_filtering.py'],
   env: {
