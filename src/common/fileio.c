@@ -3,11 +3,15 @@
 #include "fileio.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <dirent.h>
 #include <stdlib.h>
+#include <strings.h>
+#include <unistd.h>
 
 static void close_file(FILE** fp) {
     if (fp && *fp) {
@@ -16,16 +20,231 @@ static void close_file(FILE** fp) {
     }
 }
 
+static void cleanup_temp_read(ZContext* ctx) {
+    if (ctx && ctx->temp_read_is_split && ctx->temp_read_path) {
+        unlink(ctx->temp_read_path);
+    }
+    if (ctx) {
+        free(ctx->temp_read_path);
+        ctx->temp_read_path = NULL;
+        ctx->temp_read_is_split = false;
+    }
+}
+
+static bool has_zip_suffix(const char* path) {
+    if (!path) {
+        return false;
+    }
+    const char* dot = strrchr(path, '.');
+    return dot && strcasecmp(dot, ".zip") == 0;
+}
+
+static void free_part_list(char** parts, size_t count) {
+    if (!parts)
+        return;
+    for (size_t i = 0; i < count; ++i)
+        free(parts[i]);
+    free(parts);
+}
+
+static int collect_split_parts(const char* path, char*** parts_out, size_t* count_out) {
+    if (!parts_out || !count_out) {
+        return ZU_STATUS_USAGE;
+    }
+    *parts_out = NULL;
+    *count_out = 0;
+
+    if (!has_zip_suffix(path)) {
+        return ZU_STATUS_OK;
+    }
+
+    size_t path_len = strlen(path);
+    if (path_len < 4) {
+        return ZU_STATUS_OK;
+    }
+    size_t base_len = path_len - 4; /* Strip ".zip" */
+
+    char buf[PATH_MAX];
+    int n = snprintf(buf, sizeof(buf), "%.*s.z%02d", (int)base_len, path, 1);
+    if (n <= 0 || n >= (int)sizeof(buf)) {
+        return ZU_STATUS_IO;
+    }
+
+    struct stat st;
+    if (stat(buf, &st) != 0) {
+        if (errno == ENOENT) {
+            return ZU_STATUS_OK; /* Not split */
+        }
+        return ZU_STATUS_IO;
+    }
+
+    char** parts = NULL;
+    size_t count = 0;
+
+    for (int idx = 1;; ++idx) {
+        n = snprintf(buf, sizeof(buf), "%.*s.z%02d", (int)base_len, path, idx);
+        if (n <= 0 || n >= (int)sizeof(buf)) {
+            free_part_list(parts, count);
+            return ZU_STATUS_IO;
+        }
+        if (stat(buf, &st) != 0) {
+            if (errno == ENOENT) {
+                break; /* No more parts */
+            }
+            free_part_list(parts, count);
+            return ZU_STATUS_IO;
+        }
+        char* part = strdup(buf);
+        if (!part) {
+            free_part_list(parts, count);
+            return ZU_STATUS_OOM;
+        }
+        char** np = realloc(parts, (count + 1) * sizeof(char*));
+        if (!np) {
+            free(part);
+            free_part_list(parts, count);
+            return ZU_STATUS_OOM;
+        }
+        parts = np;
+        parts[count++] = part;
+    }
+
+    if (stat(path, &st) != 0) {
+        free_part_list(parts, count);
+        return ZU_STATUS_IO;
+    }
+    char* last = strdup(path);
+    if (!last) {
+        free_part_list(parts, count);
+        return ZU_STATUS_OOM;
+    }
+    char** np = realloc(parts, (count + 1) * sizeof(char*));
+    if (!np) {
+        free(last);
+        free_part_list(parts, count);
+        return ZU_STATUS_OOM;
+    }
+    parts = np;
+    parts[count++] = last;
+
+    *parts_out = parts;
+    *count_out = count;
+    return ZU_STATUS_OK;
+}
+
+static int concat_split_parts(ZContext* ctx, char** parts, size_t count, char** path_out) {
+    if (!ctx || !parts || count == 0 || !path_out) {
+        return ZU_STATUS_USAGE;
+    }
+
+    char template[] = "/tmp/zu-split-XXXXXX";
+    int fd = mkstemp(template);
+    if (fd < 0) {
+        zu_context_set_error(ctx, ZU_STATUS_IO, "mkstemp failed for split archive");
+        return ZU_STATUS_IO;
+    }
+
+    FILE* out = fdopen(fd, "wb");
+    if (!out) {
+        close(fd);
+        unlink(template);
+        zu_context_set_error(ctx, ZU_STATUS_IO, "fdopen failed for split archive");
+        return ZU_STATUS_IO;
+    }
+
+    uint8_t* buf = malloc(64 * 1024);
+    if (!buf) {
+        fclose(out);
+        unlink(template);
+        return ZU_STATUS_OOM;
+    }
+
+    int rc = ZU_STATUS_OK;
+    for (size_t i = 0; i < count; ++i) {
+        FILE* in = fopen(parts[i], "rb");
+        if (!in) {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "open split part '%s' failed", parts[i]);
+            zu_context_set_error(ctx, ZU_STATUS_IO, msg);
+            rc = ZU_STATUS_IO;
+            break;
+        }
+
+        size_t got;
+        while ((got = fread(buf, 1, 64 * 1024, in)) > 0) {
+            if (fwrite(buf, 1, got, out) != got) {
+                zu_context_set_error(ctx, ZU_STATUS_IO, "write temp split archive failed");
+                rc = ZU_STATUS_IO;
+                break;
+            }
+        }
+        if (ferror(in) && rc == ZU_STATUS_OK) {
+            zu_context_set_error(ctx, ZU_STATUS_IO, "read split part failed");
+            rc = ZU_STATUS_IO;
+        }
+        fclose(in);
+        if (rc != ZU_STATUS_OK)
+            break;
+    }
+
+    free(buf);
+    if (fclose(out) != 0 && rc == ZU_STATUS_OK) {
+        zu_context_set_error(ctx, ZU_STATUS_IO, "flush split archive failed");
+        rc = ZU_STATUS_IO;
+    }
+
+    if (rc != ZU_STATUS_OK) {
+        unlink(template);
+        return rc;
+    }
+
+    char* path = strdup(template);
+    if (!path) {
+        unlink(template);
+        return ZU_STATUS_OOM;
+    }
+    *path_out = path;
+    return ZU_STATUS_OK;
+}
+
 int zu_open_input(ZContext* ctx, const char* path) {
     if (!ctx || !path) {
         return ZU_STATUS_USAGE;
     }
     close_file(&ctx->in_file);
-    ctx->in_file = fopen(path, "rb");
+    cleanup_temp_read(ctx);
+
+    char** parts = NULL;
+    size_t part_count = 0;
+    int rc = collect_split_parts(path, &parts, &part_count);
+    if (rc != ZU_STATUS_OK) {
+        free_part_list(parts, part_count);
+        zu_context_set_error(ctx, rc, "split detection failed");
+        return rc;
+    }
+
+    const char* open_path = path;
+    if (part_count > 0) {
+        char* temp_path = NULL;
+        rc = concat_split_parts(ctx, parts, part_count, &temp_path);
+        free_part_list(parts, part_count);
+        if (rc != ZU_STATUS_OK) {
+            return rc;
+        }
+        ctx->temp_read_path = temp_path;
+        ctx->temp_read_is_split = true;
+        open_path = temp_path;
+    }
+    else {
+        free_part_list(parts, part_count);
+    }
+
+    ctx->in_file = fopen(open_path, "rb");
     if (!ctx->in_file) {
         char buf[128];
         snprintf(buf, sizeof(buf), "open input '%s': %s", path, strerror(errno));
         zu_context_set_error(ctx, ZU_STATUS_IO, buf);
+        cleanup_temp_read(ctx);
         return ZU_STATUS_IO;
     }
     return ZU_STATUS_OK;
@@ -52,6 +271,7 @@ void zu_close_files(ZContext* ctx) {
     }
     close_file(&ctx->in_file);
     close_file(&ctx->out_file);
+    cleanup_temp_read(ctx);
 }
 
 static int walk_dir(ZContext* ctx, const char* root, ZU_StrList* list) {

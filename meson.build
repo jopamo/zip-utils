@@ -172,6 +172,15 @@ test('integration-logging', python3,
   timeout: 30
 )
 
+test('integration-split-read', python3,
+  args: [meson.project_source_root() / 'tests/test_split_read.py'],
+  env: {
+    'WRITE_BIN': zip_exe.full_path(),
+    'UNZIP_BIN': unzip_exe.full_path()
+  },
+  timeout: 60
+)
+
 test('integration-time-filtering', python3,
   args: [meson.project_source_root() / 'tests/test_time_filtering.py'],
   env: {
@@ -198,6 +207,14 @@ test('integration-move', python3,
 
 test('integration-comments', python3,
   args: [meson.project_source_root() / 'tests/test_comments.py'],
+  env: {
+    'WRITE_BIN': zip_exe.full_path()
+  },
+  timeout: 30
+)
+
+test('integration-comment-edit', python3,
+  args: [meson.project_source_root() / 'tests/test_comment_edit.py'],
   env: {
     'WRITE_BIN': zip_exe.full_path()
   },

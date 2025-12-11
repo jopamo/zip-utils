@@ -27,7 +27,7 @@ See `OPTION_MATRIX.md` for a per-option breakdown.
 ### zip
 - [ ] Remaining man-page flags not parsed (examples: `-A`, `-@`, `-b`, `-B`, `-D`/`-DB`, `-df`/`-du`, `-g`, `-k`/`-L`/`-LL`, `-MM`, `-nw`/`-ws`, `-R`, `-S`, `-TT`, `-U*`, `-V`, `-X`, `-y`, `-!`, long-option aliases, response files).
 - [x] Streaming input parity: treating `-` as stdin with data descriptors like Info-ZIP (`compress_to_temp`/CRC pre-pass currently requires seekable input).
-- [x] Entry comments preserved on rewrite; archive comments are written with `-z` (entry comment editing not exposed).
+- [x] Entry comments preserved on rewrite; archive comments (including comment-only updates) are written with `-z` (entry comment editing not exposed).
 - [ ] Full pattern/recursion parity: must-match semantics (`-MM`), hidden/system file handling, case-folding choices, and include/exclude precedence are not matched to Info-ZIP.
 - [ ] Self-extractor offset adjustments (`-A`) and SFX stub integration are missing.
 
@@ -44,7 +44,7 @@ See `OPTION_MATRIX.md` for a per-option breakdown.
 
 ## Archive Format & Feature Gaps
 - [x] Comment handling: archive comments written and preserved; entry comments preserved on rewrite (no CLI edit path yet).
-- [ ] Split-archive support is asymmetric: writer can emit splits, reader cannot open `.z01`/`.zip`.
+- [x] Split-archive support: writer emits splits; reader can open `.z01`/`.zip` by concatenating parts (disk metadata still simplified).
 - [ ] AES/WinZip encryption and newer compression methods (LZMA, PPMd, etc.) are not supported; only deflate/store/bzip2 + ZipCrypto exist.
 - [ ] Symlink/FIFO handling is blocked by default and lacks user-facing toggles; symbolic links are not stored as links.
 - [ ] Extended metadata (ACLs, EAs, UID/GID, NTFS timestamps, DOS attributes, UTF-8/codepage flags) is not preserved or configurable.
@@ -53,6 +53,6 @@ See `OPTION_MATRIX.md` for a per-option breakdown.
 - [x] Streaming output/input without known sizes (data descriptors) for stdin/stdout writes.
 
 ## Priority Backlog
-1. Read split archives (`.z01` + `.zip`) in reader.
-2. Add remaining parsed behaviors (`-q` levels, pager), then wire unparsed options in priority order.
-3. Surface entry comment editing (zipnote-style flows) and align with Info-ZIP prompts.
+1. Add remaining parsed behaviors (`-q` levels, pager), then wire unparsed options in priority order.
+2. Surface entry comment editing (zipnote-style flows) and align with Info-ZIP prompts.
+3. Broaden platform/attribute handling (text/binary toggles, Unicode/codepage flags).

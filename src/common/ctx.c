@@ -74,6 +74,7 @@ void zu_context_free(ZContext* ctx) {
     zu_strlist_free_with_dtor(&ctx->existing_entries, zu_existing_entry_free);
     free(ctx->io_buffer);
     free(ctx->zip_comment);
+    free(ctx->temp_read_path);
     free(ctx->password);
     free(ctx);
 }

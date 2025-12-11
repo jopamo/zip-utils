@@ -30,7 +30,7 @@ Derived from `zip.txt` and `unzip.txt`. Status values:
 | `-x`, `-i` | working | Include/exclude globs; must-match precedence (`-MM`) not implemented. |
 | `-e`, `-P` | working | ZipCrypto only. |
 | `-O` | working | Copy-on-write output path. |
-| `-s`, `-sp` | working (write) | Split write and pause; **reader cannot open split archives**. |
+| `-s`, `-sp` | working | Split write and pause; reader opens `.z01` + `.zip` concatenated splits (disk metadata simplified). |
 | `-t`, `-tt` | working | Time filters. |
 | `-F`, `-FF` | partial | Fix/fixfix implemented; recovery semantics need validation. |
 | `zipnote` alias | partial | Lists comments only; no edit/write. |
@@ -72,7 +72,7 @@ Derived from `zip.txt` and `unzip.txt`. Status values:
 | `-V`, `-VV`, `-w`, `-ww` | missing | VMS attribute/version handling. |
 | `-X` | missing | Do not save extra attributes. |
 | `-y` | missing | Store symlinks as links. |
-| `-z` | partial | Archive comment write/preserve; entry comments preserved on rewrite but not editable yet. |
+| `-z` | working | Archive comments can be added/edited via `-z` even without other inputs; entry comments are preserved on rewrite (editing entry comments still pending). |
 | `-!` | missing | Use privileges (Amiga). |
 | `-fz-` | missing | Force Zip64 off. |
 | Long-option aliases/negations | partial | Only wired for implemented short options. |
@@ -86,7 +86,7 @@ Derived from `zip.txt` and `unzip.txt`. Status values:
 | `-v` | working | Verbose listing; routes to zipinfo mode. |
 | `-Z` | working | Enter zipinfo mode. |
 | `-1`, `-2`, `-s`, `-m`, `-h`, `-T`, `-z`, `-M` (zipinfo) | partial | Names-only/short/medium/header/footer/decimal time/comments/pager; formatting/pager parity not fully validated. |
-| Multi-disk read | missing | Cannot open split archives. |
+| Multi-disk read | working | Opens `.z01` + `.zip` split archives by concatenating parts. |
 | Symlink/FIFO | missing | Rejected; no allow flag. |
 | `-A` | missing | DLL API help. |
 | `-a`, `-aa` | missing | Text conversion. |
@@ -117,6 +117,6 @@ Derived from `zip.txt` and `unzip.txt`. Status values:
 | Long-option aliases/negations | partial | Only wired for implemented short options. |
 
 ## Priority Backlog
-1. Preserve entry comments and full `zip -z` parity (editing existing comments, per-entry comments).
-2. Read split archives (`.z01` + `.zip`) in reader.
-3. Add remaining parsed behaviors (`-q` levels, pager), then wire unparsed options in priority order.
+1. Add remaining parsed behaviors (`-q` levels, pager), then wire unparsed options in priority order.
+2. Surface entry comment editing (zipnote-style flows) and align with Info-ZIP prompts.
+3. Broaden platform/attribute handling (text/binary toggles, Unicode/codepage flags).

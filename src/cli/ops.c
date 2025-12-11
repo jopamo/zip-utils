@@ -21,9 +21,8 @@ int zu_zip_run(ZContext* ctx) {
         return zu_test_archive(ctx);
     }
 
-    // If no inputs and not fixing/testing, nothing to do
-    // Exception: maybe filter modes? But for now:
-    if (ctx->include.len == 0) {
+    // Allow comment-only updates via -z even when no inputs are provided.
+    if (ctx->include.len == 0 && !ctx->zip_comment_specified) {
         fprintf(stderr, "zip: nothing to do\n");
         return ZU_STATUS_USAGE;
     }

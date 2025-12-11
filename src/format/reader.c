@@ -490,6 +490,9 @@ static int read_cd_info(ZContext* ctx, zu_cd_info* info, bool load_comment) {
         ctx->zip_comment = NULL;
         ctx->zip_comment_len = 0;
     }
+    else if (ctx->zip_comment_specified) {
+        // Preserve a user-supplied comment (from -z) instead of overwriting it with the on-disk value.
+    }
     else if (endrec.comment_len > 0) {
         char* comment = malloc(endrec.comment_len + 1);
         if (!comment) {

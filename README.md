@@ -118,8 +118,8 @@ See `HACKING.md` for development/testing expectations. Behavioral parity trackin
 
 - Focused on POSIX hosts; platform-specific behaviors (VMS, OS/2, Windows ACLs/EAs) are not implemented.
 - Supported methods are deflate/store/bzip2 with legacy ZipCrypto only; AES and newer compression methods are not yet handled.
-- `zipnote`, `zipcloak`, and `zipsplit` are recognized aliases but remain minimal (entry comments not edited, no re-encryption, split handling is new).
-- Archive comments supported via `zip -z` and preserved on rewrite; entry comments are preserved but not editable yet.
+- `zipnote`, `zipcloak`, and `zipsplit` are recognized aliases but remain minimal (entry comments not edited, no re-encryption; split read/write is supported but disk metadata is simplified).
+- Archive comments supported via `zip -z` (including comment-only edits) and preserved on rewrite; entry comments are preserved but not editable yet.
 - Option surface is intentionally smaller for now; unsupported flags fail fast with usage until parity work lands.
 
 ---

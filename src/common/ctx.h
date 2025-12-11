@@ -41,6 +41,8 @@ struct ZContext {
     uint64_t current_offset;
     uint8_t* io_buffer;
     size_t io_buffer_size;
+    char* temp_read_path;    /* Concatenated split archive path */
+    bool temp_read_is_split; /* Whether temp_read_path should be unlinked */
 
     /* Configuration */
     int compression_level;  /* 0-9 */
