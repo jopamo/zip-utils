@@ -68,26 +68,33 @@ static void print_usage(FILE* to, const char* argv0) {
             "  -m                    Move input files (delete after)\n"
             "  -u                    Update: add only newer files\n"
             "  -f                    Freshen: replace existing entries\n"
+            "  -FS                   File Sync: update and delete missing\n"
             "  -T                    Test archive after writing\n"
             "  -q / -v               Quiet / verbose output\n"
             "  -x pattern            Exclude pattern (can repeat)\n"
             "  -i pattern            Include pattern (can repeat)\n"
             "  -0 .. -9              Compression level\n"
+            "  -Z method             Compression method (deflate, bzip2)\n"
             "  --help                Show this help\n",
             argv0);
 }
 
 static int parse_zip_args(int argc, char** argv, ZContext* ctx) {
     static const struct option long_opts[] = {
-        {"recurse-paths", no_argument, NULL, 'r'}, {"test", no_argument, NULL, 'T'},           {"quiet", no_argument, NULL, 'q'},     {"verbose", no_argument, NULL, 'v'},
-        {"encrypt", no_argument, NULL, 'e'},       {"password", required_argument, NULL, 'P'}, {"help", no_argument, NULL, 'h'},      {"output-file", required_argument, NULL, 'O'},
-        {"la", no_argument, NULL, 1001},           {"log-append", no_argument, NULL, 1001},    {"lf", required_argument, NULL, 1002}, {"logfile-path", required_argument, NULL, 1002},
-        {"li", no_argument, NULL, 1003},           {"log-info", no_argument, NULL, 1003},      {"tt", required_argument, NULL, 1004}, {NULL, 0, NULL, 0},
+        {"recurse-paths", no_argument, NULL, 'r'}, {"test", no_argument, NULL, 'T'},
+        {"quiet", no_argument, NULL, 'q'},         {"verbose", no_argument, NULL, 'v'},
+        {"encrypt", no_argument, NULL, 'e'},       {"password", required_argument, NULL, 'P'},
+        {"help", no_argument, NULL, 'h'},          {"output-file", required_argument, NULL, 'O'},
+        {"la", no_argument, NULL, 1001},           {"log-append", no_argument, NULL, 1001},
+        {"lf", required_argument, NULL, 1002},     {"logfile-path", required_argument, NULL, 1002},
+        {"li", no_argument, NULL, 1003},           {"log-info", no_argument, NULL, 1003},
+        {"tt", required_argument, NULL, 1004},     {"filesync", no_argument, NULL, 1005},
+        {"FS", no_argument, NULL, 1005},           {NULL, 0, NULL, 0},
     };
 
     int opt;
     // Added O, t to short opts
-    while ((opt = getopt_long_only(argc, argv, "rjTqvmdfui:x:0123456789heP:O:t:", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long_only(argc, argv, "rjTqvmdfui:x:0123456789heP:O:t:Z:", long_opts, NULL)) != -1) {
         switch (opt) {
             case 'r':
                 ctx->recursive = true;
@@ -105,6 +112,10 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx) {
                 ctx->freshen = true;
                 break;
             case 'u':
+                ctx->update = true;
+                break;
+            case 1005:  // -FS
+                ctx->filesync = true;
                 ctx->update = true;
                 break;
             case 'T':
@@ -175,6 +186,21 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx) {
             case '8':
             case '9':
                 ctx->compression_level = opt - '0';
+                break;
+            case 'Z':
+                if (strcasecmp(optarg, "deflate") == 0) {
+                    ctx->compression_method = 8;
+                }
+                else if (strcasecmp(optarg, "store") == 0) {
+                    ctx->compression_method = 0;
+                }
+                else if (strcasecmp(optarg, "bzip2") == 0) {
+                    ctx->compression_method = 12;
+                }
+                else {
+                    fprintf(stderr, "zip: unknown compression method '%s'\n", optarg);
+                    return ZU_STATUS_USAGE;
+                }
                 break;
             case 'h':
                 print_usage(stdout, argv[0]);

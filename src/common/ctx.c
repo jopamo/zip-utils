@@ -11,6 +11,7 @@ ZContext* zu_context_create(void) {
     }
 
     ctx->compression_level = 6;
+    ctx->compression_method = 8;
     ctx->store_paths = true;
     ctx->match_case = true;
     ctx->last_error = ZU_STATUS_OK;

@@ -16,6 +16,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <zlib.h>
+#include <bzlib.h>
 #include <fnmatch.h>
 #include <time.h>
 
@@ -174,6 +175,9 @@ static void zi_format_method(uint16_t method, char* out, size_t len) {
             break;
         case 9:
             name = "defS";
+            break;
+        case 12:
+            name = "bzip";
             break;
         default:
             name = "unkn";
@@ -925,6 +929,76 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
             }
 
             inflateEnd(&strm);
+        }
+    }
+    else if (hdr->method == 12) {
+        bz_stream strm;
+        memset(&strm, 0, sizeof(strm));
+        int bzrc = BZ2_bzDecompressInit(&strm, 0, 0);
+        if (bzrc != BZ_OK) {
+            rc = ZU_STATUS_IO;
+            zu_context_set_error(ctx, rc, "bzDecompressInit failed");
+        }
+        else {
+            uint64_t remaining = comp_size;
+            bzrc = BZ_OK;
+            while (rc == ZU_STATUS_OK && remaining > 0) {
+                size_t to_read = remaining > ZU_IO_CHUNK ? ZU_IO_CHUNK : (size_t)remaining;
+                size_t got_data = fread(in_buf, 1, to_read, ctx->in_file);
+                if (got_data != to_read) {
+                    rc = ZU_STATUS_IO;
+                    zu_context_set_error(ctx, rc, "short read on compressed data");
+                    break;
+                }
+                if (encrypted) {
+                    zu_zipcrypto_decrypt(&zc, in_buf, got_data);
+                }
+                remaining -= got_data;
+
+                strm.next_in = (char*)in_buf;
+                strm.avail_in = (unsigned int)got_data;
+
+                do {
+                    strm.next_out = (char*)out_buf;
+                    strm.avail_out = (unsigned int)ZU_IO_CHUNK;
+                    bzrc = BZ2_bzDecompress(&strm);
+                    if (bzrc != BZ_OK && bzrc != BZ_STREAM_END) {
+                        rc = ZU_STATUS_IO;
+                        zu_context_set_error(ctx, rc, "bzip2 decompression failed");
+                        break;
+                    }
+                    size_t have = ZU_IO_CHUNK - strm.avail_out;
+                    if (have > 0) {
+                        crc = zu_crc32(out_buf, have, crc);
+                        if (!test_only) {
+                            if (fwrite(out_buf, 1, have, fp) != have) {
+                                rc = ZU_STATUS_IO;
+                                zu_context_set_error(ctx, rc, "write output file failed");
+                                break;
+                            }
+                        }
+                        written += have;
+                    }
+                } while (strm.avail_out == 0);
+
+                if (rc != ZU_STATUS_OK || bzrc == BZ_STREAM_END) {
+                    break;
+                }
+            }
+
+            if (rc == ZU_STATUS_OK) {
+                if (bzrc == BZ_STREAM_END && remaining > 0) {
+                    if (fseeko(ctx->in_file, (off_t)remaining, SEEK_CUR) != 0) {
+                        rc = ZU_STATUS_IO;
+                        zu_context_set_error(ctx, rc, "seek past compressed data failed");
+                    }
+                }
+                else if (bzrc != BZ_STREAM_END) {
+                    rc = ZU_STATUS_IO;
+                    zu_context_set_error(ctx, rc, "bzip2 did not reach stream end");
+                }
+            }
+            BZ2_bzDecompressEnd(&strm);
         }
     }
     else {

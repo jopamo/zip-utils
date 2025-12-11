@@ -38,6 +38,7 @@ core_sources = files(
   'src/common/ctx.c',
   'src/common/fileio.c',
   'src/compression/zlib_shim.c',
+  'src/compression/bzip2_shim.c',
   'src/compression/crc32.c',
   'src/compression/zipcrypto.c',
   'src/format/reader.c',
@@ -45,12 +46,14 @@ core_sources = files(
 )
 
 zlib_dep = dependency('zlib')
+cc = meson.get_compiler('c')
+bz2_dep = cc.find_library('bz2', required: true)
 
 libziputils = static_library(
   'ziputils',
   core_sources,
   include_directories: [inc_src],
-  dependencies: [zlib_dep],
+  dependencies: [zlib_dep, bz2_dep],
   c_args: extra_c_args,
   link_args: extra_link_args
 )
@@ -60,7 +63,7 @@ zip_exe = executable(
   files('src/cli/main_zip.c', 'src/cli/ops.c'),
   include_directories: [inc_src],
   link_with: [libziputils],
-  dependencies: [zlib_dep],
+  dependencies: [zlib_dep, bz2_dep],
   c_args: extra_c_args,
   link_args: extra_link_args,
   install: true
@@ -71,7 +74,7 @@ unzip_exe = executable(
   files('src/cli/main_unzip.c', 'src/cli/ops.c'),
   include_directories: [inc_src],
   link_with: [libziputils],
-  dependencies: [zlib_dep],
+  dependencies: [zlib_dep, bz2_dep],
   c_args: extra_c_args,
   link_args: extra_link_args,
   install: true

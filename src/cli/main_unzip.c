@@ -118,12 +118,12 @@ static int parse_unzip_args(int argc, char** argv, ZContext* ctx) {
                 break;
             case 'v':
                 ctx->verbose = true;
-                if (ctx->zipinfo_mode) {
-                    ctx->zi_format = ZU_ZI_FMT_VERBOSE;
-                    ctx->zi_format_specified = true;
-                    ctx->list_only = true;
-                    ctx->zi_show_comments = true;
-                }
+                ctx->list_only = true;
+                /* unzip -v is effectively zipinfo -v or long format */
+                ctx->zipinfo_mode = true;
+                ctx->zi_format = ZU_ZI_FMT_VERBOSE;
+                ctx->zi_format_specified = true;
+                ctx->zi_show_comments = true;
                 break;
             case 'C':
                 ctx->match_case = false;

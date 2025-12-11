@@ -43,7 +43,8 @@ struct ZContext {
     size_t io_buffer_size;
 
     /* Configuration */
-    int compression_level; /* 0-9 */
+    int compression_level;  /* 0-9 */
+    int compression_method; /* 8=deflate, 12=bzip2 */
     bool recursive;
     bool store_paths;
     bool remove_source;
@@ -53,6 +54,7 @@ struct ZContext {
     bool difference_mode;
     bool freshen;
     bool update;
+    bool filesync; /* -FS */
     bool output_to_stdout;
     bool list_only;
     bool overwrite;

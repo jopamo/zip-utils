@@ -19,6 +19,7 @@
 #include "fileio.h"
 #include "zip_headers.h"
 #include "zipcrypto.h"
+#include "bzip2_shim.h"
 
 #define ZU_EXTRA_ZIP64 0x0001
 #define ZU_IO_CHUNK (64 * 1024)
@@ -226,7 +227,7 @@ static int compute_crc_and_size(ZContext* ctx, const char* path, uint32_t* crc_o
     return ZU_STATUS_OK;
 }
 
-static int deflate_to_temp(ZContext* ctx, const char* path, int level, FILE** temp_out, uint32_t* crc_out, uint64_t* uncomp_out, uint64_t* comp_out) {
+static int compress_to_temp(ZContext* ctx, const char* path, int method, int level, FILE** temp_out, uint32_t* crc_out, uint64_t* uncomp_out, uint64_t* comp_out) {
     if (!temp_out) {
         return ZU_STATUS_USAGE;
     }
@@ -257,70 +258,139 @@ static int deflate_to_temp(ZContext* ctx, const char* path, int level, FILE** te
         return ZU_STATUS_OOM;
     }
 
-    z_stream strm;
-    memset(&strm, 0, sizeof(strm));
-    int lvl = (level < 0 || level > 9) ? Z_DEFAULT_COMPRESSION : level;
-    int zrc = deflateInit2(&strm, lvl, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY);
-    if (zrc != Z_OK) {
-        free(inbuf);
-        free(outbuf);
-        fclose(in);
-        fclose(tmp);
-        zu_context_set_error(ctx, ZU_STATUS_IO, "compression init failed");
-        return ZU_STATUS_IO;
-    }
-
     uint32_t crc = 0;
     uint64_t total_in = 0;
     size_t got = 0;
     int rc = ZU_STATUS_OK;
 
-    while ((got = fread(inbuf, 1, ZU_IO_CHUNK, in)) > 0) {
-        crc = zu_crc32(inbuf, got, crc);
-        total_in += got;
-        strm.next_in = inbuf;
-        strm.avail_in = (uInt)got;
+    if (method == 8) { /* Deflate */
+        z_stream strm;
+        memset(&strm, 0, sizeof(strm));
+        int lvl = (level < 0 || level > 9) ? Z_DEFAULT_COMPRESSION : level;
+        int zrc = deflateInit2(&strm, lvl, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY);
+        if (zrc != Z_OK) {
+            rc = ZU_STATUS_IO;
+            zu_context_set_error(ctx, rc, "compression init failed");
+            goto comp_done;
+        }
+
+        while ((got = fread(inbuf, 1, ZU_IO_CHUNK, in)) > 0) {
+            crc = zu_crc32(inbuf, got, crc);
+            total_in += got;
+            strm.next_in = inbuf;
+            strm.avail_in = (uInt)got;
+            do {
+                strm.next_out = outbuf;
+                strm.avail_out = (uInt)ZU_IO_CHUNK;
+                zrc = deflate(&strm, Z_NO_FLUSH);
+                if (zrc != Z_OK) {
+                    rc = ZU_STATUS_IO;
+                    zu_context_set_error(ctx, rc, "compression failed");
+                    deflateEnd(&strm);
+                    goto comp_done;
+                }
+                size_t have = ZU_IO_CHUNK - strm.avail_out;
+                if (have > 0 && fwrite(outbuf, 1, have, tmp) != have) {
+                    rc = ZU_STATUS_IO;
+                    zu_context_set_error(ctx, rc, "write compressed data failed");
+                    deflateEnd(&strm);
+                    goto comp_done;
+                }
+            } while (strm.avail_out == 0);
+        }
+        if (ferror(in)) {
+            rc = ZU_STATUS_IO;
+            zu_context_set_error(ctx, rc, "read failed during compression");
+            deflateEnd(&strm);
+            goto comp_done;
+        }
         do {
             strm.next_out = outbuf;
             strm.avail_out = (uInt)ZU_IO_CHUNK;
-            zrc = deflate(&strm, Z_NO_FLUSH);
-            if (zrc != Z_OK) {
+            zrc = deflate(&strm, Z_FINISH);
+            if (zrc != Z_OK && zrc != Z_STREAM_END) {
                 rc = ZU_STATUS_IO;
-                zu_context_set_error(ctx, rc, "compression failed");
-                goto deflate_done;
+                zu_context_set_error(ctx, rc, "compression finish failed");
+                deflateEnd(&strm);
+                goto comp_done;
             }
             size_t have = ZU_IO_CHUNK - strm.avail_out;
             if (have > 0 && fwrite(outbuf, 1, have, tmp) != have) {
                 rc = ZU_STATUS_IO;
                 zu_context_set_error(ctx, rc, "write compressed data failed");
-                goto deflate_done;
+                deflateEnd(&strm);
+                goto comp_done;
             }
-        } while (strm.avail_out == 0);
+        } while (zrc != Z_STREAM_END);
+        deflateEnd(&strm);
     }
-    if (ferror(in)) {
-        rc = ZU_STATUS_IO;
-        zu_context_set_error(ctx, rc, "read failed during compression");
-        goto deflate_done;
-    }
-    do {
-        strm.next_out = outbuf;
-        strm.avail_out = (uInt)ZU_IO_CHUNK;
-        zrc = deflate(&strm, Z_FINISH);
-        if (zrc != Z_OK && zrc != Z_STREAM_END) {
+    else if (method == 12) { /* Bzip2 */
+        bz_stream strm;
+        memset(&strm, 0, sizeof(strm));
+        int lvl = (level < 1 || level > 9) ? 9 : level;
+        int bzrc = BZ2_bzCompressInit(&strm, lvl, 0, 30);
+        if (bzrc != BZ_OK) {
             rc = ZU_STATUS_IO;
-            zu_context_set_error(ctx, rc, "compression finish failed");
-            goto deflate_done;
+            zu_context_set_error(ctx, rc, "bzip2 init failed");
+            goto comp_done;
         }
-        size_t have = ZU_IO_CHUNK - strm.avail_out;
-        if (have > 0 && fwrite(outbuf, 1, have, tmp) != have) {
-            rc = ZU_STATUS_IO;
-            zu_context_set_error(ctx, rc, "write compressed data failed");
-            goto deflate_done;
-        }
-    } while (zrc != Z_STREAM_END);
 
-deflate_done:
-    deflateEnd(&strm);
+        while ((got = fread(inbuf, 1, ZU_IO_CHUNK, in)) > 0) {
+            crc = zu_crc32(inbuf, got, crc);
+            total_in += got;
+            strm.next_in = (char*)inbuf;
+            strm.avail_in = (unsigned int)got;
+            do {
+                strm.next_out = (char*)outbuf;
+                strm.avail_out = (unsigned int)ZU_IO_CHUNK;
+                bzrc = BZ2_bzCompress(&strm, BZ_RUN);
+                if (bzrc != BZ_RUN_OK) {
+                    rc = ZU_STATUS_IO;
+                    zu_context_set_error(ctx, rc, "bzip2 compression failed");
+                    BZ2_bzCompressEnd(&strm);
+                    goto comp_done;
+                }
+                size_t have = ZU_IO_CHUNK - strm.avail_out;
+                if (have > 0 && fwrite(outbuf, 1, have, tmp) != have) {
+                    rc = ZU_STATUS_IO;
+                    zu_context_set_error(ctx, rc, "write compressed data failed");
+                    BZ2_bzCompressEnd(&strm);
+                    goto comp_done;
+                }
+            } while (strm.avail_out == 0);
+        }
+        if (ferror(in)) {
+            rc = ZU_STATUS_IO;
+            zu_context_set_error(ctx, rc, "read failed during compression");
+            BZ2_bzCompressEnd(&strm);
+            goto comp_done;
+        }
+        do {
+            strm.next_out = (char*)outbuf;
+            strm.avail_out = (unsigned int)ZU_IO_CHUNK;
+            bzrc = BZ2_bzCompress(&strm, BZ_FINISH);
+            if (bzrc != BZ_FINISH_OK && bzrc != BZ_STREAM_END) {
+                rc = ZU_STATUS_IO;
+                zu_context_set_error(ctx, rc, "bzip2 finish failed");
+                BZ2_bzCompressEnd(&strm);
+                goto comp_done;
+            }
+            size_t have = ZU_IO_CHUNK - strm.avail_out;
+            if (have > 0 && fwrite(outbuf, 1, have, tmp) != have) {
+                rc = ZU_STATUS_IO;
+                zu_context_set_error(ctx, rc, "write compressed data failed");
+                BZ2_bzCompressEnd(&strm);
+                goto comp_done;
+            }
+        } while (bzrc != BZ_STREAM_END);
+        BZ2_bzCompressEnd(&strm);
+    }
+    else {
+        rc = ZU_STATUS_NOT_IMPLEMENTED;
+        zu_context_set_error(ctx, rc, "unsupported compression method");
+    }
+
+comp_done:
     free(inbuf);
     free(outbuf);
     fclose(in);
@@ -619,6 +689,35 @@ int zu_modify_archive(ZContext* ctx) {
     }
     else {
         /* Add / Update Mode */
+
+        /* 2a. Expand directories if recursion enabled */
+        if (zu_expand_args(ctx) != ZU_STATUS_OK) {
+            return ZU_STATUS_OOM;
+        }
+
+        /* 2b. File Sync (-FS) deletion pass */
+        if (ctx->filesync) {
+            /* Sync mode: delete entries that are in archive but NOT on filesystem.
+               In standard zip, this scope is limited to the input arguments.
+               Since we expanded arguments, we can check against FS directly.
+               However, standard behavior is safer: Iterate existing entries, check if they exist on FS. */
+            for (size_t i = 0; i < ctx->existing_entries.len; ++i) {
+                zu_existing_entry* e = (zu_existing_entry*)ctx->existing_entries.items[i];
+                if (e->delete)
+                    continue;
+
+                /* Check if file exists */
+                struct stat st;
+                if (lstat(e->name, &st) != 0) {
+                    /* File missing, delete from archive */
+                    e->delete = true;
+                    if (ctx->verbose || ctx->log_info) {
+                        zu_log(ctx, "deleting: %s\n", e->name);
+                    }
+                }
+            }
+        }
+
         /* For each file in include list, check if it exists in archive */
         /* Note: This simplistic loop matches filenames. Ideally we map them. */
 
@@ -741,10 +840,19 @@ int zu_modify_archive(ZContext* ctx) {
             bool compress = ctx->compression_level > 0;
             if (info.st.st_size == 0)
                 compress = false;
-            method = compress ? 8 : 0;
 
             if (compress) {
-                rc = deflate_to_temp(ctx, path, ctx->compression_level, &staged, &crc, &uncomp_size, &comp_size);
+                method = ctx->compression_method;
+                if (method == 0) {
+                    compress = false;
+                }
+            }
+            else {
+                method = 0;
+            }
+
+            if (compress) {
+                rc = compress_to_temp(ctx, path, method, ctx->compression_level, &staged, &crc, &uncomp_size, &comp_size);
             }
             else {
                 rc = compute_crc_and_size(ctx, path, &crc, &uncomp_size);

@@ -53,5 +53,3 @@ Low-priority or highly specific features.
     - [ ] Add `--display-counts` (entry count).
 - [ ] **Advanced Unicode Handling** (`-UN`)
     - [ ] Implement conflict resolution between standard path fields and Info-ZIP Unicode Path Extra Fields.
-- [ ] **OS-Specific Attributes**
-    - [ ] Add support for preserving attributes from other OSes (VMS, OS/2, MacOS resource forks) if strictly necessary for portability.
