@@ -571,6 +571,347 @@ static int write_file_data(ZContext* ctx, const char* path, FILE* staged, uint64
     return ZU_STATUS_OK;
 }
 
+static int write_data_descriptor(ZContext* ctx, uint32_t crc, uint64_t comp_size, uint64_t uncomp_size, bool use_zip64) {
+    if (use_zip64 || comp_size > UINT32_MAX || uncomp_size > UINT32_MAX) {
+        zu_data_descriptor64 dd64 = {
+            .signature = ZU_SIG_DESCRIPTOR,
+            .crc32 = crc,
+            .comp_size = comp_size,
+            .uncomp_size = uncomp_size,
+        };
+        if (zu_write_output(ctx, &dd64, sizeof(dd64)) != ZU_STATUS_OK) {
+            zu_context_set_error(ctx, ZU_STATUS_IO, "write data descriptor failed");
+            return ZU_STATUS_IO;
+        }
+        return ZU_STATUS_OK;
+    }
+
+    zu_data_descriptor dd = {
+        .signature = ZU_SIG_DESCRIPTOR,
+        .crc32 = crc,
+        .comp_size = (uint32_t)comp_size,
+        .uncomp_size = (uint32_t)uncomp_size,
+    };
+    if (zu_write_output(ctx, &dd, sizeof(dd)) != ZU_STATUS_OK) {
+        zu_context_set_error(ctx, ZU_STATUS_IO, "write data descriptor failed");
+        return ZU_STATUS_IO;
+    }
+    return ZU_STATUS_OK;
+}
+
+static int write_streaming_entry(ZContext* ctx,
+                                 const char* path,
+                                 const char* stored,
+                                 const zu_input_info* info,
+                                 uint16_t dos_time,
+                                 uint16_t dos_date,
+                                 uint64_t zip64_trigger,
+                                 uint64_t* offset,
+                                 zu_entry_list* entries) {
+    if (!ctx || !stored || !info || !offset || !entries) {
+        return ZU_STATUS_USAGE;
+    }
+
+    bool compress = ctx->compression_level > 0 && ctx->compression_method != 0;
+    if (info->size_known && info->st.st_size == 0) {
+        compress = false;
+    }
+    uint16_t method = compress ? ctx->compression_method : 0;
+    uint16_t flags = 0x0008; /* data descriptor */
+
+    uint32_t ext_attr = 0;
+    uint16_t version_made = 20;
+#if defined(__unix__) || defined(__APPLE__) || defined(__linux__)
+    version_made = (3 << 8) | 20;
+    uint8_t dos_attr = 0;
+    if (S_ISDIR(info->st.st_mode))
+        dos_attr |= 0x10;
+    if (!(info->st.st_mode & S_IWUSR))
+        dos_attr |= 0x01;
+    ext_attr = ((uint32_t)info->st.st_mode << 16) | dos_attr;
+#endif
+
+    if (ctx->encrypt && ctx->password) {
+        flags |= 1;
+    }
+
+    size_t name_len = strlen(stored);
+    uint16_t version_needed = (method == 0 ? 10 : 20);
+    if (*offset >= zip64_trigger) {
+        version_needed = 45;
+    }
+
+    zu_local_header lho = {
+        .signature = ZU_SIG_LOCAL,
+        .version_needed = version_needed,
+        .flags = flags,
+        .method = method,
+        .mod_time = dos_time,
+        .mod_date = dos_date,
+        .crc32 = 0,
+        .comp_size = 0,
+        .uncomp_size = 0,
+        .name_len = (uint16_t)name_len,
+        .extra_len = 0,
+    };
+
+    if (zu_write_output(ctx, &lho, sizeof(lho)) != ZU_STATUS_OK || zu_write_output(ctx, stored, name_len) != ZU_STATUS_OK) {
+        zu_context_set_error(ctx, ZU_STATUS_IO, "write local header failed");
+        return ZU_STATUS_IO;
+    }
+
+    zu_zipcrypto_ctx zc;
+    zu_zipcrypto_ctx* pzc = NULL;
+    uint64_t comp_size = 0;
+    uint64_t uncomp_size = 0;
+    uint32_t crc = 0;
+
+    if (flags & 1) {
+        zu_zipcrypto_init(&zc, ctx->password);
+        pzc = &zc;
+        uint8_t header[12];
+        for (int k = 0; k < 12; ++k)
+            header[k] = (uint8_t)(rand() & 0xff);
+        header[11] = (uint8_t)(dos_time >> 8); /* bit 3 set: use mod_time high byte */
+        zu_zipcrypto_encrypt(&zc, header, 12);
+        if (zu_write_output(ctx, header, 12) != ZU_STATUS_OK) {
+            zu_context_set_error(ctx, ZU_STATUS_IO, "write encryption header failed");
+            return ZU_STATUS_IO;
+        }
+        comp_size += 12;
+    }
+
+    FILE* src = info->is_stdin ? stdin : fopen(path, "rb");
+    if (!src) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "open '%s': %s", path, strerror(errno));
+        zu_context_set_error(ctx, ZU_STATUS_IO, msg);
+        return ZU_STATUS_IO;
+    }
+
+    uint8_t* inbuf = malloc(ZU_IO_CHUNK);
+    uint8_t* outbuf = compress ? malloc(ZU_IO_CHUNK) : NULL;
+    if (!inbuf || (compress && !outbuf)) {
+        free(inbuf);
+        free(outbuf);
+        if (src != stdin)
+            fclose(src);
+        zu_context_set_error(ctx, ZU_STATUS_OOM, "allocating streaming buffers failed");
+        return ZU_STATUS_OOM;
+    }
+
+    int rc = ZU_STATUS_OK;
+    if (!compress) {
+        size_t got = 0;
+        while ((got = fread(inbuf, 1, ZU_IO_CHUNK, src)) > 0) {
+            crc = zu_crc32(inbuf, got, crc);
+            uncomp_size += got;
+            if (pzc) {
+                zu_zipcrypto_encrypt(pzc, inbuf, got);
+            }
+            if (zu_write_output(ctx, inbuf, got) != ZU_STATUS_OK) {
+                rc = ZU_STATUS_IO;
+                zu_context_set_error(ctx, rc, "write output failed");
+                break;
+            }
+            comp_size += got;
+        }
+        if (rc == ZU_STATUS_OK && ferror(src)) {
+            rc = ZU_STATUS_IO;
+            zu_context_set_error(ctx, rc, "read failed during streaming copy");
+        }
+    }
+    else if (method == 8) {
+        z_stream strm;
+        memset(&strm, 0, sizeof(strm));
+        int lvl = (ctx->compression_level < 0 || ctx->compression_level > 9) ? Z_DEFAULT_COMPRESSION : ctx->compression_level;
+        int zrc = deflateInit2(&strm, lvl, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY);
+        if (zrc != Z_OK) {
+            rc = ZU_STATUS_IO;
+            zu_context_set_error(ctx, rc, "compression init failed");
+        }
+        else {
+            size_t got = 0;
+            while ((got = fread(inbuf, 1, ZU_IO_CHUNK, src)) > 0) {
+                crc = zu_crc32(inbuf, got, crc);
+                uncomp_size += got;
+                strm.next_in = inbuf;
+                strm.avail_in = (uInt)got;
+                do {
+                    strm.next_out = outbuf;
+                    strm.avail_out = (uInt)ZU_IO_CHUNK;
+                    zrc = deflate(&strm, Z_NO_FLUSH);
+                    if (zrc != Z_OK && zrc != Z_STREAM_END) {
+                        rc = ZU_STATUS_IO;
+                        zu_context_set_error(ctx, rc, "compression failed");
+                        break;
+                    }
+                    size_t have = ZU_IO_CHUNK - strm.avail_out;
+                    if (have > 0) {
+                        if (pzc) {
+                            zu_zipcrypto_encrypt(pzc, outbuf, have);
+                        }
+                        if (zu_write_output(ctx, outbuf, have) != ZU_STATUS_OK) {
+                            rc = ZU_STATUS_IO;
+                            zu_context_set_error(ctx, rc, "write compressed output failed");
+                            break;
+                        }
+                        comp_size += have;
+                    }
+                } while (strm.avail_out == 0);
+                if (rc != ZU_STATUS_OK) {
+                    break;
+                }
+            }
+            if (rc == ZU_STATUS_OK && ferror(src)) {
+                rc = ZU_STATUS_IO;
+                zu_context_set_error(ctx, rc, "read failed during streaming compression");
+            }
+            if (rc == ZU_STATUS_OK) {
+                do {
+                    strm.next_out = outbuf;
+                    strm.avail_out = (uInt)ZU_IO_CHUNK;
+                    zrc = deflate(&strm, Z_FINISH);
+                    if (zrc != Z_OK && zrc != Z_STREAM_END) {
+                        rc = ZU_STATUS_IO;
+                        zu_context_set_error(ctx, rc, "compression finish failed");
+                        break;
+                    }
+                    size_t have = ZU_IO_CHUNK - strm.avail_out;
+                    if (have > 0) {
+                        if (pzc) {
+                            zu_zipcrypto_encrypt(pzc, outbuf, have);
+                        }
+                        if (zu_write_output(ctx, outbuf, have) != ZU_STATUS_OK) {
+                            rc = ZU_STATUS_IO;
+                            zu_context_set_error(ctx, rc, "write compressed output failed");
+                            break;
+                        }
+                        comp_size += have;
+                    }
+                } while (zrc != Z_STREAM_END && rc == ZU_STATUS_OK);
+            }
+            deflateEnd(&strm);
+        }
+    }
+    else if (method == 12) {
+        bz_stream strm;
+        memset(&strm, 0, sizeof(strm));
+        int lvl = (ctx->compression_level < 1 || ctx->compression_level > 9) ? 9 : ctx->compression_level;
+        int bzrc = BZ2_bzCompressInit(&strm, lvl, 0, 30);
+        if (bzrc != BZ_OK) {
+            rc = ZU_STATUS_IO;
+            zu_context_set_error(ctx, rc, "bzip2 init failed");
+        }
+        else {
+            size_t got = 0;
+            while ((got = fread(inbuf, 1, ZU_IO_CHUNK, src)) > 0) {
+                crc = zu_crc32(inbuf, got, crc);
+                uncomp_size += got;
+                strm.next_in = (char*)inbuf;
+                strm.avail_in = (unsigned int)got;
+                do {
+                    strm.next_out = (char*)outbuf;
+                    strm.avail_out = (unsigned int)ZU_IO_CHUNK;
+                    bzrc = BZ2_bzCompress(&strm, BZ_RUN);
+                    if (bzrc != BZ_RUN_OK) {
+                        rc = ZU_STATUS_IO;
+                        zu_context_set_error(ctx, rc, "bzip2 compression failed");
+                        break;
+                    }
+                    size_t have = ZU_IO_CHUNK - strm.avail_out;
+                    if (have > 0) {
+                        if (pzc) {
+                            zu_zipcrypto_encrypt(pzc, outbuf, have);
+                        }
+                        if (zu_write_output(ctx, outbuf, have) != ZU_STATUS_OK) {
+                            rc = ZU_STATUS_IO;
+                            zu_context_set_error(ctx, rc, "write compressed output failed");
+                            break;
+                        }
+                        comp_size += have;
+                    }
+                } while (strm.avail_out == 0);
+                if (rc != ZU_STATUS_OK) {
+                    break;
+                }
+            }
+            if (rc == ZU_STATUS_OK && ferror(src)) {
+                rc = ZU_STATUS_IO;
+                zu_context_set_error(ctx, rc, "read failed during streaming compression");
+            }
+            if (rc == ZU_STATUS_OK) {
+                do {
+                    strm.next_out = (char*)outbuf;
+                    strm.avail_out = (unsigned int)ZU_IO_CHUNK;
+                    bzrc = BZ2_bzCompress(&strm, BZ_FINISH);
+                    if (bzrc != BZ_FINISH_OK && bzrc != BZ_STREAM_END) {
+                        rc = ZU_STATUS_IO;
+                        zu_context_set_error(ctx, rc, "bzip2 finish failed");
+                        break;
+                    }
+                    size_t have = ZU_IO_CHUNK - strm.avail_out;
+                    if (have > 0) {
+                        if (pzc) {
+                            zu_zipcrypto_encrypt(pzc, outbuf, have);
+                        }
+                        if (zu_write_output(ctx, outbuf, have) != ZU_STATUS_OK) {
+                            rc = ZU_STATUS_IO;
+                            zu_context_set_error(ctx, rc, "write compressed output failed");
+                            break;
+                        }
+                        comp_size += have;
+                    }
+                } while (bzrc != BZ_STREAM_END && rc == ZU_STATUS_OK);
+            }
+            BZ2_bzCompressEnd(&strm);
+        }
+    }
+    else {
+        rc = ZU_STATUS_NOT_IMPLEMENTED;
+        zu_context_set_error(ctx, rc, "unsupported streaming compression method");
+    }
+
+    if (src != stdin) {
+        fclose(src);
+    }
+    free(inbuf);
+    free(outbuf);
+
+    if (rc != ZU_STATUS_OK) {
+        return rc;
+    }
+
+    bool need_zip64 = comp_size >= zip64_trigger || uncomp_size >= zip64_trigger || *offset >= zip64_trigger;
+    if (write_data_descriptor(ctx, crc, comp_size, uncomp_size, need_zip64) != ZU_STATUS_OK) {
+        return ZU_STATUS_IO;
+    }
+    uint64_t desc_len = need_zip64 ? sizeof(zu_data_descriptor64) : sizeof(zu_data_descriptor);
+
+    if (ensure_entry_capacity(entries) != ZU_STATUS_OK) {
+        zu_context_set_error(ctx, ZU_STATUS_OOM, "allocating entry list failed");
+        return ZU_STATUS_OOM;
+    }
+
+    entries->items[entries->len].name = strdup(stored);
+    entries->items[entries->len].crc32 = crc;
+    entries->items[entries->len].comp_size = comp_size;
+    entries->items[entries->len].uncomp_size = uncomp_size;
+    entries->items[entries->len].lho_offset = *offset;
+    entries->items[entries->len].method = method;
+    entries->items[entries->len].mod_time = dos_time;
+    entries->items[entries->len].mod_date = dos_date;
+    entries->items[entries->len].ext_attr = ext_attr;
+    entries->items[entries->len].version_made = need_zip64 ? (uint16_t)((3 << 8) | 45) : version_made;
+    entries->items[entries->len].zip64 = need_zip64;
+    entries->items[entries->len].flags = flags;
+    entries->len++;
+
+    uint64_t header_len = sizeof(lho) + name_len + lho.extra_len;
+    *offset += header_len + comp_size + desc_len;
+    return ZU_STATUS_OK;
+}
+
 static int copy_existing_entry(ZContext* ctx, const zu_existing_entry* e, uint64_t* written_out) {
     if (fseeko(ctx->in_file, (off_t)e->lho_offset, SEEK_SET) != 0) {
         zu_context_set_error(ctx, ZU_STATUS_IO, "seek to old LHO failed");
@@ -954,6 +1295,14 @@ int zu_modify_archive(ZContext* ctx) {
             /* Copy-paste from original writer loop */
             uint16_t dos_time = 0, dos_date = 0;
             msdos_datetime(&info.st, &dos_time, &dos_date);
+
+            bool streaming = info.is_stdin || !info.size_known;
+            if (streaming) {
+                rc = write_streaming_entry(ctx, path, stored, &info, dos_time, dos_date, zip64_trigger, &offset, &entries);
+                if (rc != ZU_STATUS_OK)
+                    goto cleanup;
+                continue;
+            }
 
             uint32_t crc = 0;
             uint64_t uncomp_size = 0, comp_size = 0;

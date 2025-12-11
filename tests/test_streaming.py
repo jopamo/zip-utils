@@ -3,100 +3,58 @@
 import os
 import subprocess
 import tempfile
-import sys
 from pathlib import Path
 import zipfile
 
 
-def run_pipe(cmd, input_data, cwd=None):
+def zip_bin_path() -> str:
+    override = os.environ.get('WRITE_BIN')
+    if override:
+        return override
+    return str(Path(__file__).resolve().parents[1] / 'build' / 'zip')
+
+
+def run_zip(cmd, input_data: bytes, cwd: Path):
     return subprocess.run(cmd, input=input_data, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False)
 
 
+def assert_stream_archive(path: Path, expected: bytes):
+    with zipfile.ZipFile(path, 'r') as zf:
+        info = zf.getinfo('-')
+        if (info.flag_bits & 0x08) == 0:
+            raise SystemExit("data descriptor flag missing on streamed entry")
+        content = zf.read('-')
+        if content != expected:
+            raise SystemExit(f"content mismatch: {content!r} != {expected!r}")
+        if info.compress_type != zipfile.ZIP_DEFLATED:
+            raise SystemExit(f"unexpected compression method: {info.compress_type}")
+
+
 def main():
-    zip_bin = str(Path(__file__).resolve().parents[1] / 'build-meson-asan' / 'zip')
-    zip_bin = os.path.abspath(zip_bin)
-    unzip_bin = os.environ.get('UNZIP_BIN', 'unzip')
+    zip_path = Path(zip_bin_path())
+    if not zip_path.exists():
+        raise SystemExit(f"zip binary not found at {zip_path}")
 
-    if not os.path.exists(zip_bin):
-        print(f"Zip binary not found at {zip_bin}")
-        sys.exit(1)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
 
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_path = Path(tmp)
+        data1 = b"stream me content\n"
         archive = tmp_path / 'stream_in.zip'
-        
-        # Test 1: Stdin to File
-        input_content = b"stream me content"
-        
-        cmd = [zip_bin, str(archive), '-']
-        res = run_pipe(cmd, input_content, cwd=tmp_path)
-        
-        if res.stderr:
-            print(f"Test 1 Zip Stderr:\n{res.stderr.decode()}")
-
-        if res.returncode != 0:
-            print(f"Test 1 failed: zip command returned non-zero exit code {res.returncode}")
-            sys.exit(1)
-            
+        res1 = run_zip([str(zip_path), str(archive), '-'], data1, tmp_path)
+        if res1.returncode != 0:
+            raise SystemExit(f"zip stdin->file failed: {res1.stderr.decode()}")
         if not archive.exists() or archive.stat().st_size == 0:
-            print(f"Test 1 failed: Archive file {archive} does not exist or is empty.")
-            sys.exit(1)
-            
-        # Verify content
-        import pdb; pdb.set_trace()
-        try:
-            with zipfile.ZipFile(archive, 'r') as zf:
-                info = zf.getinfo('-')
-                if not (info.flag_bits & 0x08):
-                     print("Test 1 Warning: Bit 3 (Data Descriptor) not set for streaming input")
-                     sys.exit(1)
-                
-                content = zf.read('-')
-                if content != input_content:
-                    print(f"Test 1 Content mismatch: {content} != {input_content}")
-                    sys.exit(1)
-        except Exception as e:
-            print(f"Test 1 Verification failed: {e}")
-            sys.exit(1)
+            raise SystemExit("archive file missing after stdin stream write")
+        assert_stream_archive(archive, data1)
 
-        print("Test 1 (Stdin -> File) Passed")
-
-        # Test 2: Stdin to Stdout
-        archive_out = tmp_path / 'stream_out.zip'
-        input_content_2 = b"stream me too content"
-        
-        cmd2 = [zip_bin, '-', '-']
-        res2 = run_pipe(cmd2, input_content_2, cwd=tmp_path)
-        
-        if res2.stderr:
-            print(f"Test 2 Zip Stderr:\n{res2.stderr.decode()}")
+        data2 = b"stream me too content\n"
+        res2 = run_zip([str(zip_path), '-', '-'], data2, tmp_path)
         if res2.returncode != 0:
-            print(f"Test 2 failed: zip command returned non-zero exit code {res2.returncode}")
-            sys.exit(1)
-            
-        with open(archive_out, 'wb') as f:
-            f.write(res2.stdout)
-        
-        if not archive_out.exists() or archive_out.stat().st_size == 0:
-            print(f"Test 2 failed: Archive file {archive_out} does not exist or is empty.")
-            sys.exit(1)
-            
-        try:
-            with zipfile.ZipFile(archive_out, 'r') as zf:
-                info = zf.getinfo('-')
-                if not (info.flag_bits & 0x08):
-                     print("Test 2 Warning: Bit 3 not set")
-                     sys.exit(1)
-                
-                content = zf.read('-')
-                if content != input_content_2:
-                    print(f"Test 2 Content mismatch: {content} != {input_content_2}")
-                    sys.exit(1)
-        except Exception as e:
-            print(f"Test 2 Verification failed: {e}")
-            sys.exit(1)
+            raise SystemExit(f"zip stdin->stdout failed: {res2.stderr.decode()}")
+        out_path = tmp_path / 'stream_out.zip'
+        out_path.write_bytes(res2.stdout)
+        assert_stream_archive(out_path, data2)
 
-        print("Test 2 (Stdin -> Stdout) Passed")
 
 if __name__ == '__main__':
     main()

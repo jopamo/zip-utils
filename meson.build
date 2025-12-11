@@ -156,6 +156,14 @@ test('integration-create', python3,
   timeout: 30
 )
 
+test('integration-streaming', python3,
+  args: [meson.project_source_root() / 'tests/test_streaming.py'],
+  env: {
+    'WRITE_BIN': zip_exe.full_path()
+  },
+  timeout: 30
+)
+
 test('integration-logging', python3,
   args: [meson.project_source_root() / 'tests/test_logging.py'],
   env: {
