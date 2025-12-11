@@ -9,6 +9,9 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    env:
+      ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1:abort_on_error=1
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
 
     steps:
       - name: Check out repo
@@ -22,15 +25,15 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y \
               clang meson ninja-build valgrind pkg-config cmake \
-              zlib1g-dev libbz2-dev liblzma-dev
+              zlib1g-dev libbz2-dev liblzma-dev zip unzip
           elif command -v dnf >/dev/null 2>&1; then
             sudo dnf install -y \
               clang meson ninja-build valgrind pkg-config cmake \
-              zlib-devel bzip2-devel xz-devel
+              zlib-devel bzip2-devel xz-devel zip unzip
           elif command -v yum >/dev/null 2>&1; then
             sudo yum install -y \
               clang meson ninja-build valgrind pkg-config cmake \
-              zlib-devel bzip2-devel xz-devel
+              zlib-devel bzip2-devel xz-devel zip unzip
           else
             echo "error: unknown distro, please install zlib/bzip2/xz dev headers manually" >&2
             exit 1
