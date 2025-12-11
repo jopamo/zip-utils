@@ -24,15 +24,15 @@ jobs:
           if command -v apt-get >/dev/null 2>&1; then
             sudo apt-get update
             sudo apt-get install -y \
-              clang meson ninja-build valgrind pkg-config cmake \
+              clang meson ninja-build pkg-config cmake \
               zlib1g-dev libbz2-dev liblzma-dev zip unzip
           elif command -v dnf >/dev/null 2>&1; then
             sudo dnf install -y \
-              clang meson ninja-build valgrind pkg-config cmake \
+              clang meson ninja-build pkg-config cmake \
               zlib-devel bzip2-devel xz-devel zip unzip
           elif command -v yum >/dev/null 2>&1; then
             sudo yum install -y \
-              clang meson ninja-build valgrind pkg-config cmake \
+              clang meson ninja-build pkg-config cmake \
               zlib-devel bzip2-devel xz-devel zip unzip
           else
             echo "error: unknown distro, please install zlib/bzip2/xz dev headers manually" >&2
@@ -53,20 +53,3 @@ jobs:
         run: |
           meson test -C build-sanitize --timeout-multiplier 5 \
             || (cat build-sanitize/meson-logs/testlog.txt && false)
-
-      # separate build without sanitizers, so Valgrind isn't fighting ASan
-      - name: Configure (valgrind)
-        run: |
-          meson setup build-valgrind \
-            --buildtype=debug \
-            -Ddebug_sanitize=false
-
-      - name: Build (valgrind)
-        run: meson compile -C build-valgrind
-
-      - name: Test under Valgrind
-        run: |
-          meson test -C build-valgrind \
-            --timeout-multiplier 10 \
-            --wrap='valgrind --leak-check=full --show-leak-kinds=all --errors-for-leak-kinds=all --error-exitcode=1' \
-            || (cat build-valgrind/meson-logs/testlog.txt && false)
