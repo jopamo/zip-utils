@@ -32,6 +32,36 @@ static time_t parse_date(const char* str) {
     return (time_t)-1;
 }
 
+static uint64_t parse_size(const char* str) {
+    char* end;
+    double val = strtod(str, &end);
+    if (end == str || val < 0)
+        return 0;
+
+    uint64_t mult = 1;
+    if (*end) {
+        switch (*end) {
+            case 'k':
+            case 'K':
+                mult = 1024;
+                break;
+            case 'm':
+            case 'M':
+                mult = 1024 * 1024;
+                break;
+            case 'g':
+            case 'G':
+                mult = 1024 * 1024 * 1024;
+                break;
+            case 't':
+            case 'T':
+                mult = 1024ULL * 1024ULL * 1024ULL * 1024ULL;
+                break;
+        }
+    }
+    return (uint64_t)(val * mult);
+}
+
 static bool is_alias(const char* argv0, const char* name) {
     const char* base = strrchr(argv0, '/');
     base = base ? base + 1 : argv0;
@@ -89,12 +119,15 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx) {
         {"lf", required_argument, NULL, 1002},     {"logfile-path", required_argument, NULL, 1002},
         {"li", no_argument, NULL, 1003},           {"log-info", no_argument, NULL, 1003},
         {"tt", required_argument, NULL, 1004},     {"filesync", no_argument, NULL, 1005},
-        {"FS", no_argument, NULL, 1005},           {NULL, 0, NULL, 0},
+        {"FS", no_argument, NULL, 1005},           {"split-size", required_argument, NULL, 's'},
+        {"pause", no_argument, NULL, 1006},        {"sp", no_argument, NULL, 1006},
+        {"fix", no_argument, NULL, 'F'},           {"FF", no_argument, NULL, 1007},
+        {"fixfix", no_argument, NULL, 1007},       {NULL, 0, NULL, 0},
     };
 
     int opt;
     // Added O, t to short opts
-    while ((opt = getopt_long_only(argc, argv, "rjTqvmdfui:x:0123456789heP:O:t:Z:", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long_only(argc, argv, "rjTqvmdfui:x:0123456789heP:O:t:Z:s:F", long_opts, NULL)) != -1) {
         switch (opt) {
             case 'r':
                 ctx->recursive = true;
@@ -117,6 +150,33 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx) {
             case 1005:  // -FS
                 ctx->filesync = true;
                 ctx->update = true;
+                break;
+            case 's':
+                ctx->split_size = parse_size(optarg);
+                if (ctx->split_size == 0) {
+                    fprintf(stderr, "zip: invalid split size: %s\n", optarg);
+                    return ZU_STATUS_USAGE;
+                }
+                break;
+            case 1006:  // -sp (pause) -- usually passed as -sp, but getopt_long_only might match -s if not careful.
+                        // Actually, standard zip uses -s <size> and -sp for pause.
+                        // Since we use getopt_long_only, "-sp" might be interpreted as short 's' with arg "p" if we aren't careful?
+                        // No, getopt_long_only checks long options first.
+                        // But "sp" isn't in long_opts? Wait. "pause" is 1006.
+                        // The user said "-s" and "-sp".
+                        // If I want to support "-sp" specifically, I should probably add it as a long option or handle it differently.
+                        // However, since we are using getopt_long_only, we can just add "sp" to long_opts or handle it manually?
+                        // Standard zip options are a mix.
+                        // Let's assume user uses `--pause` or we need to hack it.
+                        // Wait, standard `zip` treats `-sp` as a flag. But `zip -s 10m` takes an arg.
+                        // If I put "sp" in long_opts, it will work with single dash too in long_only mode.
+                ctx->split_pause = true;
+                break;
+            case 'F':
+                ctx->fix_archive = true;
+                break;
+            case 1007:  // -FF
+                ctx->fix_fix_archive = true;
                 break;
             case 'T':
                 ctx->test_integrity = true;

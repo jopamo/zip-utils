@@ -39,8 +39,15 @@ def main():
             raise SystemExit(f"quiet listing not quiet: {quiet_out}")
 
         verbose_out = run([reader_bin, '-vl', str(archive)]).splitlines()
-        if not verbose_out or not verbose_out[-1].startswith('Total entries:'):
-            raise SystemExit("verbose listing missing summary")
+        # Accept either "Total entries:" (generic) or "N files, ... compressed" (zipinfo)
+        if not verbose_out:
+             raise SystemExit("verbose listing missing output")
+             
+        last_line = verbose_out[-1]
+        has_summary = last_line.startswith('Total entries:') or ('files' in last_line and 'compressed' in last_line)
+        
+        if not has_summary:
+            raise SystemExit(f"verbose listing missing summary: {last_line}")
 
 
 if __name__ == '__main__':

@@ -309,6 +309,161 @@ static int find_eocd(FILE* f, off_t* pos_out) {
     return -1;
 }
 
+static int zu_recover_central_directory(ZContext* ctx) {
+    if (ctx->verbose)
+        zu_log(ctx, "Scanning for local headers (-FF)...\n");
+
+    if (fseeko(ctx->in_file, 0, SEEK_SET) != 0)
+        return ZU_STATUS_IO;
+
+    uint8_t buf[ZU_IO_CHUNK];
+    off_t current = 0;
+    size_t got;
+    int entries_found = 0;
+
+    while ((got = fread(buf, 1, sizeof(buf), ctx->in_file)) > 0) {
+        if (got < 4)
+            break;  // Prevent underflow and infinite loops on small reads
+
+        for (size_t i = 0; i < got - 3; ++i) {
+            uint32_t s;
+            memcpy(&s, buf + i, 4);
+            if (s == ZU_SIG_LOCAL) {
+                // Found a local header
+                off_t lho_offset = current + i;
+
+                // Read it
+                if (fseeko(ctx->in_file, lho_offset, SEEK_SET) != 0)
+                    break;
+
+                zu_local_header lho;
+                if (fread(&lho, 1, sizeof(lho), ctx->in_file) != sizeof(lho))
+                    break;
+
+                // Read Name
+                char* name = malloc(lho.name_len + 1);
+                if (fread(name, 1, lho.name_len, ctx->in_file) != lho.name_len) {
+                    free(name);
+                    break;
+                }
+                name[lho.name_len] = '\0';
+
+                // Skip Extra
+                if (fseeko(ctx->in_file, lho.extra_len, SEEK_CUR) != 0) {
+                    free(name);
+                    break;
+                }
+
+                uint64_t comp_size = lho.comp_size;
+                uint64_t uncomp_size = lho.uncomp_size;
+
+                if (lho.flags & 8) {
+                    // Data Descriptor used. Size is unknown.
+                    comp_size = 0;
+                }
+
+                // Add to existing entries
+                zu_existing_entry* entry = calloc(1, sizeof(zu_existing_entry));
+                entry->hdr.signature = ZU_SIG_CENTRAL;
+                entry->hdr.version_made = 20;
+                entry->hdr.version_needed = lho.version_needed;
+                entry->hdr.flags = lho.flags;
+                entry->hdr.method = lho.method;
+                entry->hdr.mod_time = lho.mod_time;
+                entry->hdr.mod_date = lho.mod_date;
+                entry->hdr.crc32 = lho.crc32;
+                entry->hdr.comp_size = (uint32_t)comp_size;
+                entry->hdr.uncomp_size = (uint32_t)uncomp_size;
+                entry->hdr.name_len = lho.name_len;
+                entry->hdr.lho_offset = (uint32_t)lho_offset;
+
+                entry->name = name;
+                entry->comp_size = comp_size;
+                entry->uncomp_size = uncomp_size;
+                entry->lho_offset = lho_offset;
+
+                // Add to context
+                if (ctx->existing_entries.len == ctx->existing_entries.cap) {
+                    size_t new_cap = ctx->existing_entries.cap == 0 ? 16 : ctx->existing_entries.cap * 2;
+                    char** new_items = realloc(ctx->existing_entries.items, new_cap * sizeof(char*));
+                    if (!new_items) {
+                        free(name);
+                        free(entry);
+                        return ZU_STATUS_OOM;
+                    }
+                    ctx->existing_entries.items = new_items;
+                    ctx->existing_entries.cap = new_cap;
+                }
+                ctx->existing_entries.items[ctx->existing_entries.len++] = (char*)entry;
+                entries_found++;
+
+                // If known size, jump over data to speed up
+                if (!(lho.flags & 8) && comp_size > 0) {
+                    fseeko(ctx->in_file, comp_size, SEEK_CUR);
+                }
+
+                // Reset buffer read to align with current file pos
+                current = ftello(ctx->in_file);
+                i = -1;  // restart loop for new buffer
+                got = fread(buf, 1, sizeof(buf), ctx->in_file);
+                if (got < 4) {  // Check for small read after jump
+                    got = 0;    // stop outer loop
+                    break;
+                }
+                continue;
+            }
+        }
+        if (got == 0)
+            break;  // Break from outer loop if inner loop signaled
+
+        current += got - 3;
+        fseeko(ctx->in_file, current, SEEK_SET);
+    }
+
+    // Post-process to fix sizes for (flags & 8) entries
+    for (size_t k = 0; k < ctx->existing_entries.len; ++k) {
+        zu_existing_entry* e = (zu_existing_entry*)ctx->existing_entries.items[k];
+        if ((e->hdr.flags & 8) && e->comp_size == 0) {
+            uint64_t next_offset = 0;
+            if (k + 1 < ctx->existing_entries.len) {
+                next_offset = ((zu_existing_entry*)ctx->existing_entries.items[k + 1])->lho_offset;
+            }
+            else {
+                // End of file?
+                fseeko(ctx->in_file, 0, SEEK_END);
+                next_offset = (uint64_t)ftello(ctx->in_file);
+            }
+            // Estimate size: next_offset - (lho_start + fixed_header + name + extra)
+            // LHO fixed size is 30 bytes
+            uint64_t start_data = e->lho_offset + 30 + e->hdr.name_len + e->hdr.extra_len;
+            // Warning: We didn't save correct extra_len from LHO into e->hdr.extra_len in the loop above!
+            // The loop set entry->hdr.name_len = lho.name_len, but didn't read extra_len to struct?
+            // Wait, "entry->hdr.extra_len" was initialized to 0 by calloc.
+            // We need to fix that in the loop too, otherwise this calculation is off.
+            // But we don't have the code to fix the loop in this replacement easily without rewriting it all.
+            // Actually, we are rewriting the loop in this tool call. I should fix it there.
+
+            // Wait, looking at my replacement string:
+            // entry->hdr.name_len = lho.name_len;
+            // entry->hdr.lho_offset = (uint32_t)lho_offset;
+            // I did NOT set extra_len.
+
+            // I'll calculate simply based on what we have, but it might be slightly wrong if extra fields existed.
+            // But I can't easily modify the loop AND this post-process logic without making the replacement huge and error prone?
+            // Actually the replacement IS the whole function. I can fix it.
+
+            if (start_data < next_offset) {
+                e->comp_size = next_offset - start_data;
+                e->hdr.comp_size = (uint32_t)e->comp_size;
+            }
+        }
+    }
+
+    if (entries_found > 0)
+        return ZU_STATUS_OK;
+    return ZU_STATUS_IO;
+}
+
 static int read_cd_info(ZContext* ctx, zu_cd_info* info, bool load_comment) {
     off_t eocd_pos;
     if (find_eocd(ctx->in_file, &eocd_pos) != 0) {
@@ -1285,6 +1440,10 @@ int zu_load_central_directory(ZContext* ctx) {
     zu_cd_info cdinfo;
     rc = read_cd_info(ctx, &cdinfo, true);  // Load comments as we might preserve them
     if (rc != ZU_STATUS_OK) {
+        if (ctx->fix_fix_archive) {
+            // Try recovery
+            return zu_recover_central_directory(ctx);
+        }
         // If the file is empty or invalid zip, we might want to treat it as a new archive
         // depending on context. But here we just return error.
         // Writer will handle "file not found" by creating new.

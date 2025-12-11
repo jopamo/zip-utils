@@ -101,6 +101,17 @@ struct ZContext {
     bool encrypt;
     char* password;
 
+    /* Split Archives */
+    uint64_t split_size; /* 0 = disabled */
+    bool split_pause;
+    uint32_t split_disk_index;
+    uint64_t split_written;
+    char* temp_write_path;
+
+    /* Archive Fixing */
+    bool fix_archive;     /* -F */
+    bool fix_fix_archive; /* -FF */
+
     /* Error reporting */
     int last_error;
     char error_msg[256];
