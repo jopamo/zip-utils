@@ -77,7 +77,7 @@ unzip_exe = executable(
   install: true
 )
 
-meson.add_install_script('build-aux/install-symlinks.sh')
+#meson.add_install_script('build-aux/install-symlinks.sh')
 
 # --- Tests ---
 

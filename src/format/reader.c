@@ -43,6 +43,23 @@ typedef struct {
     uint64_t entries_total;
 } zu_cd_info;
 
+#include <sys/time.h>
+#include <string.h>
+
+static time_t dos_to_unix_time(uint16_t dos_date, uint16_t dos_time) {
+    struct tm t;
+    memset(&t, 0, sizeof(t));
+    t.tm_year = ((dos_date >> 9) & 0x7f) + 80;  // years since 1900
+    t.tm_mon = ((dos_date >> 5) & 0x0f) - 1;    // 0-11
+    t.tm_mday = dos_date & 0x1f;                // 1-31
+    t.tm_hour = (dos_time >> 11) & 0x1f;        // 0-23
+    t.tm_min = (dos_time >> 5) & 0x3f;          // 0-59
+    t.tm_sec = (dos_time & 0x1f) * 2;           // 0-59 (DOS stores 2-second intervals)
+    t.tm_isdst = -1;                            // Determine daylight saving time
+
+    return mktime(&t);
+}
+
 static const char* zi_host_abbrev(uint16_t version_made) {
     int host = (version_made >> 8) & 0xff;
     switch (host) {
@@ -778,12 +795,14 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
     uint64_t written = 0;
 
     FILE* fp = NULL;
+    char* out_path = NULL;  // Moved declaration here
+
     if (!test_only) {
         if (ctx->output_to_stdout) {
             fp = stdout;
         }
         else {
-            char* out_path = build_output_path(ctx, name);
+            out_path = build_output_path(ctx, name);  // Assign to out_path
             if (!out_path) {
                 free(in_buf);
                 free(out_buf);
@@ -794,16 +813,17 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
             if (ensure_parent_dirs(out_path) != ZU_STATUS_OK) {
                 free(out_buf);
                 free(in_buf);
-                free(out_path);
+                free(out_path);  // Free here on error
                 zu_context_set_error(ctx, ZU_STATUS_IO, "creating parent directories failed");
                 return ZU_STATUS_IO;
             }
 
             fp = fopen(out_path, "wb");
-            free(out_path);
+            // out_path is NOT freed here anymore
             if (!fp) {
                 free(out_buf);
                 free(in_buf);
+                free(out_path);  // Free here on error
                 zu_context_set_error(ctx, ZU_STATUS_IO, "open output file failed");
                 return ZU_STATUS_IO;
             }
@@ -914,7 +934,36 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
 
     if (fp && fp != stdout) {
         fclose(fp);
+
+        // Restore permissions and timestamps
+        if (rc == ZU_STATUS_OK) {  // Only if writing was successful
+            mode_t mode = (mode_t)((hdr->ext_attr >> 16) & 0xffff);
+            if (mode != 0) {  // Only set if mode is explicitly set in zip
+                if (chmod(out_path, mode) != 0) {
+                    zu_context_set_error(ctx, ZU_STATUS_IO, "failed to set file permissions");
+                    rc = ZU_STATUS_IO;
+                }
+            }
+
+            if (rc == ZU_STATUS_OK) {
+                time_t mtime = dos_to_unix_time(hdr->mod_date, hdr->mod_time);
+                struct timeval times[2];
+                times[0].tv_sec = mtime;  // Access time
+                times[0].tv_usec = 0;
+                times[1].tv_sec = mtime;  // Modification time
+                times[1].tv_usec = 0;
+
+                if (utimes(out_path, times) != 0) {
+                    zu_context_set_error(ctx, ZU_STATUS_IO, "failed to set file timestamps");
+                    rc = ZU_STATUS_IO;
+                }
+            }
+        }
     }
+    if (out_path) {
+        free(out_path);  // Free out_path here after all operations
+    }
+
     free(out_buf);
     free(in_buf);
 
