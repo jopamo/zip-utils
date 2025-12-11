@@ -52,6 +52,7 @@ static void zu_existing_entry_free(void* data) {
         free(entry->name);
         free(entry->extra);
         free(entry->comment);
+        free(entry);
     }
 }
 
