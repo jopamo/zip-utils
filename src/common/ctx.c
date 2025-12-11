@@ -30,6 +30,7 @@ ZContext* zu_context_create(void) {
     ctx->zi_show_comments = false;
     ctx->zip_comment = NULL;
     ctx->zip_comment_len = 0;
+    ctx->zip_comment_specified = false;
 
     ctx->output_path = NULL;
     ctx->log_path = NULL;

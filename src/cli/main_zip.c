@@ -6,6 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
+#include <stdint.h>
 
 #include "ctx.h"
 #include "ops.h"
@@ -85,6 +86,58 @@ static int map_exit_code(int status) {
     }
 }
 
+static int read_zip_comment(ZContext* ctx) {
+    if (!ctx) {
+        return ZU_STATUS_USAGE;
+    }
+
+    size_t cap = 1024;
+    size_t len = 0;
+    char* buf = malloc(cap);
+    if (!buf) {
+        return ZU_STATUS_OOM;
+    }
+
+    size_t got = 0;
+    while ((got = fread(buf + len, 1, cap - len, stdin)) > 0) {
+        len += got;
+        if (len == cap) {
+            size_t new_cap = cap * 2;
+            char* nb = realloc(buf, new_cap);
+            if (!nb) {
+                free(buf);
+                return ZU_STATUS_OOM;
+            }
+            buf = nb;
+            cap = new_cap;
+        }
+    }
+    if (ferror(stdin)) {
+        free(buf);
+        return ZU_STATUS_IO;
+    }
+
+    if (len > UINT16_MAX) {
+        free(buf);
+        return ZU_STATUS_USAGE;
+    }
+
+    if (len == cap) {
+        char* nb = realloc(buf, cap + 1);
+        if (!nb) {
+            free(buf);
+            return ZU_STATUS_OOM;
+        }
+        buf = nb;
+        cap += 1;
+    }
+    buf[len] = '\0';
+    free(ctx->zip_comment);
+    ctx->zip_comment = buf;
+    ctx->zip_comment_len = len;
+    return ZU_STATUS_OK;
+}
+
 static void print_usage(FILE* to, const char* argv0) {
     fprintf(to,
             "Usage: %s [options] archive.zip [inputs...]\n"
@@ -127,7 +180,7 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx) {
 
     int opt;
     // Added O, t to short opts
-    while ((opt = getopt_long_only(argc, argv, "rjTqvmdfui:x:0123456789heP:O:t:Z:s:F", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long_only(argc, argv, "rjTqvmdfui:x:0123456789heP:O:t:Z:s:Fz", long_opts, NULL)) != -1) {
         switch (opt) {
             case 'r':
                 ctx->recursive = true;
@@ -262,6 +315,9 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx) {
                     return ZU_STATUS_USAGE;
                 }
                 break;
+            case 'z':
+                ctx->zip_comment_specified = true;
+                break;
             case 'h':
                 print_usage(stdout, argv[0]);
                 return ZU_STATUS_USAGE;
@@ -323,6 +379,27 @@ int main(int argc, char** argv) {
         return map_exit_code(parse_rc);
     }
 
+    if (ctx->zip_comment_specified) {
+        for (size_t i = 0; i < ctx->include.len; ++i) {
+            if (strcmp(ctx->include.items[i], "-") == 0) {
+                fprintf(stderr, "zip: -z cannot be used when reading file data from stdin\n");
+                zu_context_free(ctx);
+                return ZU_STATUS_USAGE;
+            }
+        }
+        int zrc = read_zip_comment(ctx);
+        if (zrc != ZU_STATUS_OK) {
+            if (zrc == ZU_STATUS_USAGE) {
+                fprintf(stderr, "zip: archive comment too large (max 65535 bytes)\n");
+            }
+            else if (zrc == ZU_STATUS_IO) {
+                fprintf(stderr, "zip: failed to read archive comment from stdin\n");
+            }
+            zu_context_free(ctx);
+            return map_exit_code(zrc);
+        }
+    }
+
     if (ctx->log_path) {
         ctx->log_file = fopen(ctx->log_path, ctx->log_append ? "ab" : "wb");
         if (!ctx->log_file) {
@@ -356,6 +433,7 @@ int main(int argc, char** argv) {
     if (is_zipnote) {
         ctx->zipinfo_mode = true;
         ctx->zi_show_comments = true;
+        ctx->zi_format = ZU_ZI_FMT_VERBOSE;
         ctx->list_only = true;
         // zipnote typically outputs "Name=..." lines if used for editing,
         // but just dumping comments (like unzip -z but per file) is a reasonable default

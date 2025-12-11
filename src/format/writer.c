@@ -41,6 +41,8 @@ typedef struct {
     uint32_t ext_attr;     /* External file attributes */
     uint16_t version_made; /* Version made by */
     bool zip64;
+    char* comment;
+    uint16_t comment_len;
 } zu_writer_entry;
 
 typedef struct {
@@ -65,6 +67,7 @@ static void free_entries(zu_entry_list* list) {
     }
     for (size_t i = 0; i < list->len; ++i) {
         free(list->items[i].name);
+        free(list->items[i].comment);
     }
     free(list->items);
     list->items = NULL;
@@ -998,6 +1001,7 @@ static int write_central_directory(ZContext* ctx, const zu_entry_list* entries, 
 
         uint16_t extra_len = zv > 0 ? (uint16_t)(4 + zv * sizeof(uint64_t)) : 0;
         uint16_t version_needed = entry_zip64 ? 45 : (e->method == 0 ? 10 : 20);
+        uint16_t comment_len = e->comment_len;
 
         zu_central_header ch = {
             .signature = ZU_SIG_CENTRAL,
@@ -1012,7 +1016,7 @@ static int write_central_directory(ZContext* ctx, const zu_entry_list* entries, 
             .uncomp_size = uncomp32,
             .name_len = (uint16_t)name_len,
             .extra_len = extra_len,
-            .comment_len = 0,
+            .comment_len = comment_len,
             .disk_start = 0,
             .int_attr = 0,
             .ext_attr = e->ext_attr,
@@ -1044,7 +1048,16 @@ static int write_central_directory(ZContext* ctx, const zu_entry_list* entries, 
                 return ZU_STATUS_IO;
             }
         }
-        cd_size += sizeof(ch) + name_len + extra_len;
+        if (comment_len > 0 && !e->comment) {
+            zu_context_set_error(ctx, ZU_STATUS_IO, "entry comment missing");
+            return ZU_STATUS_IO;
+        }
+        if (comment_len > 0 && e->comment) {
+            if (zu_write_output(ctx, e->comment, comment_len) != ZU_STATUS_OK) {
+                return ZU_STATUS_IO;
+            }
+        }
+        cd_size += sizeof(ch) + name_len + extra_len + comment_len;
     }
     if (cd_size > UINT32_MAX)
         needs_zip64 = true;
@@ -1055,7 +1068,7 @@ static int write_central_directory(ZContext* ctx, const zu_entry_list* entries, 
     return ZU_STATUS_OK;
 }
 
-static int write_end_central(ZContext* ctx, const zu_entry_list* entries, uint64_t cd_offset, uint64_t cd_size, bool needs_zip64) {
+static int write_end_central(ZContext* ctx, const zu_entry_list* entries, uint64_t cd_offset, uint64_t cd_size, bool needs_zip64, const char* comment, uint16_t comment_len) {
     uint16_t entry_count = entries->len > 0xffff ? 0xffff : (uint16_t)entries->len;
     zu_end_central endrec = {
         .signature = ZU_SIG_END,
@@ -1065,13 +1078,18 @@ static int write_end_central(ZContext* ctx, const zu_entry_list* entries, uint64
         .entries_total = entry_count,
         .cd_size = (needs_zip64 || cd_size > UINT32_MAX) ? 0xffffffffu : (uint32_t)cd_size,
         .cd_offset = (needs_zip64 || cd_offset > UINT32_MAX) ? 0xffffffffu : (uint32_t)cd_offset,
-        .comment_len = 0,
+        .comment_len = comment_len,
     };
     /* Fixup split fields if needed */
     /* Note: Ideally we track disk_start and disk_num properly */
 
     if (zu_write_output(ctx, &endrec, sizeof(endrec)) != ZU_STATUS_OK) {
         return ZU_STATUS_IO;
+    }
+    if (comment_len > 0 && comment) {
+        if (zu_write_output(ctx, comment, comment_len) != ZU_STATUS_OK) {
+            return ZU_STATUS_IO;
+        }
     }
     return ZU_STATUS_OK;
 }
@@ -1301,6 +1319,15 @@ int zu_modify_archive(ZContext* ctx) {
                 rc = write_streaming_entry(ctx, path, stored, &info, dos_time, dos_date, zip64_trigger, &offset, &entries);
                 if (rc != ZU_STATUS_OK)
                     goto cleanup;
+                if (ctx->remove_source && !info.is_stdin) {
+                    if (unlink(path) != 0) {
+                        char msg[128];
+                        snprintf(msg, sizeof(msg), "remove '%s' failed: %s", path, strerror(errno));
+                        zu_context_set_error(ctx, ZU_STATUS_IO, msg);
+                        rc = ZU_STATUS_IO;
+                        goto cleanup;
+                    }
+                }
                 continue;
             }
 
@@ -1419,7 +1446,10 @@ int zu_modify_archive(ZContext* ctx) {
             if (rc != ZU_STATUS_OK)
                 goto cleanup;
 
-            ensure_entry_capacity(&entries);
+            if (ensure_entry_capacity(&entries) != ZU_STATUS_OK) {
+                rc = ZU_STATUS_OOM;
+                goto cleanup;
+            }
             entries.items[entries.len].name = strdup(stored);
             entries.items[entries.len].crc32 = crc;
             entries.items[entries.len].comp_size = comp_size;
@@ -1432,9 +1462,30 @@ int zu_modify_archive(ZContext* ctx) {
             entries.items[entries.len].version_made = version_made;
             entries.items[entries.len].zip64 = zip64_lho;
             entries.items[entries.len].flags = flags;
+            entries.items[entries.len].comment = NULL;
+            entries.items[entries.len].comment_len = 0;
+            if (existing && existing->comment && existing->comment_len > 0) {
+                entries.items[entries.len].comment = malloc(existing->comment_len);
+                if (!entries.items[entries.len].comment) {
+                    rc = ZU_STATUS_OOM;
+                    goto cleanup;
+                }
+                memcpy(entries.items[entries.len].comment, existing->comment, existing->comment_len);
+                entries.items[entries.len].comment_len = existing->comment_len;
+            }
             entries.len++;
 
             offset += sizeof(lho) + name_len + extra_len + comp_size;
+
+            if (ctx->remove_source && !info.is_stdin) {
+                if (unlink(path) != 0) {
+                    char msg[128];
+                    snprintf(msg, sizeof(msg), "remove '%s' failed: %s", path, strerror(errno));
+                    zu_context_set_error(ctx, ZU_STATUS_IO, msg);
+                    rc = ZU_STATUS_IO;
+                    goto cleanup;
+                }
+            }
         }
     }
 
@@ -1456,7 +1507,10 @@ int zu_modify_archive(ZContext* ctx) {
                 if (rc != ZU_STATUS_OK)
                     goto cleanup;
 
-                ensure_entry_capacity(&entries);
+                if (ensure_entry_capacity(&entries) != ZU_STATUS_OK) {
+                    rc = ZU_STATUS_OOM;
+                    goto cleanup;
+                }
                 entries.items[entries.len].name = strdup(e->name);
                 entries.items[entries.len].crc32 = e->hdr.crc32;
                 entries.items[entries.len].comp_size = e->comp_size;
@@ -1470,6 +1524,17 @@ int zu_modify_archive(ZContext* ctx) {
                 /* Logic to detect zip64 from existing data */
                 entries.items[entries.len].zip64 = (e->comp_size >= 0xffffffffu || e->uncomp_size >= 0xffffffffu || new_offset >= 0xffffffffu);
                 entries.items[entries.len].flags = e->hdr.flags;
+                entries.items[entries.len].comment = NULL;
+                entries.items[entries.len].comment_len = 0;
+                if (e->comment && e->comment_len > 0) {
+                    entries.items[entries.len].comment = malloc(e->comment_len);
+                    if (!entries.items[entries.len].comment) {
+                        rc = ZU_STATUS_OOM;
+                        goto cleanup;
+                    }
+                    memcpy(entries.items[entries.len].comment, e->comment, e->comment_len);
+                    entries.items[entries.len].comment_len = e->comment_len;
+                }
                 entries.len++;
 
                 offset += written;
@@ -1486,7 +1551,15 @@ int zu_modify_archive(ZContext* ctx) {
         rc = write_end_central64(ctx, &entries, cd_offset, cd_size);
     }
     if (rc == ZU_STATUS_OK) {
-        rc = write_end_central(ctx, &entries, cd_offset, cd_size, need_zip64);
+        uint16_t comment_len = 0;
+        if (ctx->zip_comment_len > UINT16_MAX) {
+            zu_context_set_error(ctx, ZU_STATUS_USAGE, "archive comment too large");
+            rc = ZU_STATUS_USAGE;
+        }
+        else {
+            comment_len = (uint16_t)ctx->zip_comment_len;
+            rc = write_end_central(ctx, &entries, cd_offset, cd_size, need_zip64, ctx->zip_comment, comment_len);
+        }
     }
 
 cleanup:

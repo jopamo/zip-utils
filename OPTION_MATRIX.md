@@ -5,6 +5,16 @@ Derived from `zip.txt` and `unzip.txt`. Status values:
 - **partial**: parsed but missing man-page semantics or edge cases.
 - **missing**: not parsed; must be implemented.
 
+## Using this matrix
+
+- Status is measured against Info-ZIP 6.0 CLI semantics; add a short note when behavior intentionally differs.
+- When wiring a new flag, update the table and land a covering test in `tests/` (integration preferred for CLI flow).
+- Keep notes concise and actionable so contributors know what to validate before marking an option as working.
+- Keep the row order roughly aligned to the man pages; update `MISSING_FEATURES.md` when statuses change so both docs stay in sync.
+- If coverage is non-obvious, point to the relevant test file or suite in the Notes column.
+- Do not mark an option as working without automated coverage; parity assertions should live in integration tests where possible.
+- If a behavior differs intentionally, link to the rationale (commit/issue) in the Notes column for future reviewers.
+
 ## zip
 
 | Option(s) | Status | Notes |
@@ -14,7 +24,7 @@ Derived from `zip.txt` and `unzip.txt`. Status values:
 | `-j` | working | Junk paths. |
 | `-d` | working | Delete entries (basic globbing). |
 | `-f`, `-u`, `-FS` | working | Freshen/update/file sync implemented. |
-| `-m` | partial | Parsed but does not delete source files. |
+| `-m` | working | Moves inputs by deleting source files after successful write. |
 | `-T` | partial | Tests after write; exit-code parity not fully validated. |
 | `-q`, `-v` | working | Verbosity toggles (progress dots differ from man page). |
 | `-x`, `-i` | working | Include/exclude globs; must-match precedence (`-MM`) not implemented. |
@@ -52,7 +62,7 @@ Derived from `zip.txt` and `unzip.txt`. Status values:
 | `-nw`, `-ws` | missing | Wildcard stop-at-dir / warning tweaks. |
 | `-N` | missing | NTFS extra field storage. |
 | `-o` | missing | Set archive time to newest entry. |
-| `-p` | missing | Explicit “store paths” toggle (default behavior). |
+| `-p` | missing | Explicit "store paths" toggle (default behavior). |
 | `-Qn` | missing | QDOS headers. |
 | `-R`, `-RE` | missing | Recurse patterns / regex include. |
 | `-sb/-sc/-sf/-so/-su/-sU/-sv` | missing | Split tuning flags. |
@@ -62,7 +72,7 @@ Derived from `zip.txt` and `unzip.txt`. Status values:
 | `-V`, `-VV`, `-w`, `-ww` | missing | VMS attribute/version handling. |
 | `-X` | missing | Do not save extra attributes. |
 | `-y` | missing | Store symlinks as links. |
-| `-z` | missing | Archive comment add/edit. |
+| `-z` | partial | Archive comment write/preserve; entry comments preserved on rewrite but not editable yet. |
 | `-!` | missing | Use privileges (Amiga). |
 | `-fz-` | missing | Force Zip64 off. |
 | Long-option aliases/negations | partial | Only wired for implemented short options. |
@@ -94,7 +104,7 @@ Derived from `zip.txt` and `unzip.txt`. Status values:
 | `-L`, `-LL` | missing | Lowercase conversion and related toggles. |
 | `-N` | missing | Amiga filenotes. |
 | `-O` | missing | Override code page for filenames. |
-| `-s` (space→underscore) | missing | OS/2/NT/MS-DOS space conversion. |
+| `-s` (space->underscore) | missing | OS/2/NT/MS-DOS space conversion. |
 | `-S` | missing | VMS Stream_LF conversion. |
 | `-T` (set archive mtime) | missing | zip `-go` analog. |
 | `-U`, `-UU` | missing | UTF-8 handling tweaks. |
@@ -107,8 +117,6 @@ Derived from `zip.txt` and `unzip.txt`. Status values:
 | Long-option aliases/negations | partial | Only wired for implemented short options. |
 
 ## Priority Backlog
-1. Implement `-m` source deletion to match Info-ZIP semantics.
-2. True streaming stdin/stdout support (data descriptors) matching `zip -`/pipe behavior.
-3. Preserve/archive and entry comments (`zip -z`, keep existing comments on rewrite).
-4. Read split archives (`.z01` + `.zip`) in reader.
-5. Add remaining parsed behaviors (`-q` levels, pager), then wire unparsed options in priority order.
+1. Preserve entry comments and full `zip -z` parity (editing existing comments, per-entry comments).
+2. Read split archives (`.z01` + `.zip`) in reader.
+3. Add remaining parsed behaviors (`-q` levels, pager), then wire unparsed options in priority order.

@@ -188,6 +188,30 @@ test('integration-output-copy', python3,
   timeout: 30
 )
 
+test('integration-move', python3,
+  args: [meson.project_source_root() / 'tests/test_move_option.py'],
+  env: {
+    'WRITE_BIN': zip_exe.full_path()
+  },
+  timeout: 30
+)
+
+test('integration-comments', python3,
+  args: [meson.project_source_root() / 'tests/test_comments.py'],
+  env: {
+    'WRITE_BIN': zip_exe.full_path()
+  },
+  timeout: 30
+)
+
+test('integration-entry-comments', python3,
+  args: [meson.project_source_root() / 'tests/test_entry_comments.py'],
+  env: {
+    'WRITE_BIN': zip_exe.full_path()
+  },
+  timeout: 30
+)
+
 test('integration-unzip', python3,
   args: [meson.project_source_root() / 'tests/test_unzip_integration.py'],
   env: {

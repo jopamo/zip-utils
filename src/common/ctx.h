@@ -74,6 +74,7 @@ struct ZContext {
     int zi_format; /* enum-like selector for zipinfo output style */
     char* zip_comment;
     size_t zip_comment_len;
+    bool zip_comment_specified;
     const char* archive_path;
     const char* target_dir;
     ZU_StrList include;
