@@ -1,0 +1,69 @@
+name: CI with Clang + Sanitizers
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          set -eux
+
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y \
+              clang meson ninja-build valgrind pkg-config cmake \
+              zlib1g-dev libbz2-dev liblzma-dev
+          elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y \
+              clang meson ninja-build valgrind pkg-config cmake \
+              zlib-devel bzip2-devel xz-devel
+          elif command -v yum >/dev/null 2>&1; then
+            sudo yum install -y \
+              clang meson ninja-build valgrind pkg-config cmake \
+              zlib-devel bzip2-devel xz-devel
+          else
+            echo "error: unknown distro, please install zlib/bzip2/xz dev headers manually" >&2
+            exit 1
+          fi
+
+      # sanitizer build (clang + asan/ubsan)
+      - name: Configure (asan/ubsan)
+        run: |
+          CC=clang meson setup build-sanitize \
+            --buildtype=debug \
+            -Ddebug_sanitize=true
+
+      - name: Build (asan/ubsan)
+        run: meson compile -C build-sanitize
+
+      - name: Test (asan/ubsan)
+        run: |
+          meson test -C build-sanitize --timeout-multiplier 5 \
+            || (cat build-sanitize/meson-logs/testlog.txt && false)
+
+      # separate build without sanitizers, so Valgrind isn't fighting ASan
+      - name: Configure (valgrind)
+        run: |
+          meson setup build-valgrind \
+            --buildtype=debug \
+            -Ddebug_sanitize=false
+
+      - name: Build (valgrind)
+        run: meson compile -C build-valgrind
+
+      - name: Test under Valgrind
+        run: |
+          meson test -C build-valgrind \
+            --timeout-multiplier 10 \
+            --wrap='valgrind --leak-check=full --show-leak-kinds=all --errors-for-leak-kinds=all --error-exitcode=1' \
+            || (cat build-valgrind/meson-logs/testlog.txt && false)

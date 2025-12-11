@@ -1,0 +1,8 @@
+*.o
+/Makefile
+/funzip
+/unzipsfx
+.DS_Store
+.llm/
+tags
+build/

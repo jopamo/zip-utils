@@ -1,0 +1,72 @@
+#ifndef ZU_CTX_H
+#define ZU_CTX_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+
+#include "strlist.h"
+#include "ziputils.h"
+
+enum {
+    ZU_ZI_FMT_SHORT = 0,
+    ZU_ZI_FMT_MEDIUM,
+    ZU_ZI_FMT_LONG,
+    ZU_ZI_FMT_VERBOSE,
+    ZU_ZI_FMT_NAMES,
+};
+
+struct ZContext {
+    /* I/O */
+    FILE *in_file;
+    FILE *out_file;
+    uint64_t current_offset;
+    uint8_t *io_buffer;
+    size_t io_buffer_size;
+
+    /* Configuration */
+    int compression_level; /* 0-9 */
+    bool recursive;
+    bool store_paths;
+    bool remove_source;
+    bool test_integrity;
+    bool quiet;
+    bool verbose;
+    bool difference_mode;
+    bool freshen;
+    bool update;
+    bool output_to_stdout;
+    bool list_only;
+    bool overwrite;
+    bool match_case;
+    bool allow_symlinks;
+    bool allow_fifo;
+    bool zipinfo_mode;
+    bool zi_header;
+    bool zi_footer;
+    bool zi_list_entries;
+    bool zi_decimal_time;
+    bool zi_format_specified;
+    bool zi_header_explicit;
+    bool zi_footer_explicit;
+    bool zi_allow_pager;
+    bool zi_show_comments;
+    int zi_format; /* enum-like selector for zipinfo output style */
+    char *zip_comment;
+    size_t zip_comment_len;
+    const char *archive_path;
+    const char *target_dir;
+    ZU_StrList include;
+    ZU_StrList exclude;
+
+    /* Error reporting */
+    int last_error;
+    char error_msg[256];
+};
+
+ZContext *zu_context_create(void);
+void zu_context_free(ZContext *ctx);
+void zu_context_set_error(ZContext *ctx, int status, const char *msg);
+
+#endif

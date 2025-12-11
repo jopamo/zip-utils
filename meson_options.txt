@@ -1,0 +1,7 @@
+option(
+  'debug_sanitize',
+  type: 'boolean',
+  value: false,
+  description: 'Build with clang + address/UB sanitizers and relaxed link rules'
+)
+
