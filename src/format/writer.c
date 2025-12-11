@@ -908,6 +908,8 @@ static int write_streaming_entry(ZContext* ctx,
     entries->items[entries->len].version_made = need_zip64 ? (uint16_t)((3 << 8) | 45) : version_made;
     entries->items[entries->len].zip64 = need_zip64;
     entries->items[entries->len].flags = flags;
+    entries->items[entries->len].comment = NULL;
+    entries->items[entries->len].comment_len = 0;
     entries->len++;
 
     uint64_t header_len = sizeof(lho) + name_len + lho.extra_len;
