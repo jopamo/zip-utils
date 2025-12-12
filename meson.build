@@ -158,6 +158,14 @@ test('integration-create', python3,
   timeout: 30
 )
 
+test('integration-small-compression', python3,
+  args: [meson.project_source_root() / 'tests/test_small_file_compression.py'],
+  env: {
+    'WRITE_BIN': zip_exe.full_path()
+  },
+  timeout: 30
+)
+
 test('integration-streaming', python3,
   args: [meson.project_source_root() / 'tests/test_streaming.py'],
   env: {

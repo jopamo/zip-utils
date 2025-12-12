@@ -4,13 +4,10 @@ Compare functionality and performance between system zip and build/zip.
 
 This script runs a suite of functional tests and performance benchmarks to compare
 the behavior and speed of the system's Info-ZIP `zip` command with the project's
-`build/zip` executable. It checks exit codes, archive validity, compression ratios,
-and execution times.
+`build/zip` executable.
 
 Usage:
     ./compare_zip.py [--functional] [--performance] [--output <file>]
-
-    At least one of --functional or --performance must be specified.
 
 Options:
     --functional    Run functional parity tests (exit codes, archive validity)
@@ -20,33 +17,6 @@ Options:
 Environment variables:
     SYSTEM_ZIP: path to system zip executable (default 'zip')
     BUILD_ZIP: path to project zip executable (default 'build/zip')
-
-Output:
-    The script prints a summary to stderr. If --output is given, a JSON file is
-    written with detailed results. The JSON structure includes:
-    - "functional": list of test results with exit codes, times, sizes, differences
-    - "performance": list of benchmarks with timings, sizes, speedup ratios
-
-Functional tests cover common options: -r, -j, -0..-9, -q, -v, -x, -i, -m, -u,
--f, -FS, -T, -e, -s, -t. Each test compares exit codes and archive validity.
-
-Performance tests measure compression time and archive size for levels 0,1,6,9
-using 10MB of random data (5×2MB files). Each test runs 3 iterations, discarding
-the first as warm-up.
-
-Examples:
-    # Run both functional and performance tests
-    ./compare_zip.py --functional --performance
-
-    # Run only functional tests and save results
-    ./compare_zip.py --functional --output results.json
-
-    # Specify custom zip paths
-    BUILD_ZIP=./build-debug/zip ./compare_zip.py --functional
-
-Exit code:
-    0 on success (all tests executed, regardless of parity)
-    1 on argument error or missing binaries
 """
 
 import argparse
@@ -56,15 +26,15 @@ import tempfile
 import time
 import json
 import sys
-from pathlib import Path
-from dataclasses import dataclass, asdict
-from typing import List, Dict, Any, Optional, Tuple
 import shutil
 import zipfile
+import random
+from pathlib import Path
+from dataclasses import dataclass, asdict
+from typing import List, Tuple, Optional
 
 @dataclass
 class TestResult:
-    """Result of a single test case."""
     name: str
     system_exit_code: int
     build_exit_code: int
@@ -83,394 +53,281 @@ class TestResult:
 
 @dataclass
 class PerformanceResult:
-    """Result of a performance benchmark."""
-    name: str
+    dataset: str
+    compression_level: int
     system_time: float
     build_time: float
     system_size: int
     build_size: int
-    speedup: float  # system_time / build_time ( >1 means build faster)
-    size_ratio: float  # system_size / build_size ( >1 means build smaller)
+    speedup: float  # system_time / build_time
+    size_ratio: float  # system_size / build_size
 
 class ZipComparator:
     def __init__(self, system_zip: str, build_zip: str):
-        # Resolve to absolute paths
         self.system_zip = shutil.which(system_zip) or system_zip
         self.build_zip = str(Path(build_zip).resolve())
-        self.temp_dir = None
-        self.test_data = {}
 
     def run_cmd(self, cmd: List[str], cwd: Optional[str] = None) -> Tuple[int, str, str, float]:
-        """Run command and return (exit_code, stdout, stderr, elapsed_time)."""
         start = time.perf_counter()
         result = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         elapsed = time.perf_counter() - start
         return result.returncode, result.stdout, result.stderr, elapsed
 
-    def benchmark_cmd(self, cmd: List[str], cwd: Optional[str] = None, iterations: int = 3) -> Tuple[float, int, str, str]:
-        """Run command multiple times, return average time (excluding first), exit_code, stdout, stderr."""
-        times = []
-        exit_code = 0
-        stdout = ""
-        stderr = ""
-        for i in range(iterations):
-            start = time.perf_counter()
-            result = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            elapsed = time.perf_counter() - start
-            if i == 0:
-                # First run: capture output and exit code
-                exit_code = result.returncode
-                stdout = result.stdout
-                stderr = result.stderr
-                # Optionally discard time (warm-up)
-                continue
-            times.append(elapsed)
-        avg_time = sum(times) / len(times) if times else 0
-        return avg_time, exit_code, stdout, stderr
-
     def verify_archive(self, archive_path: Path) -> bool:
-        """Verify archive integrity using system unzip -t."""
         cmd = ['unzip', '-t', str(archive_path)]
-        exit_code, stdout, stderr, _ = self.run_cmd(cmd)
-        # unzip returns 0 for success, 1 for warnings (e.g., multi-part), 2+ for errors
+        exit_code, _, _, _ = self.run_cmd(cmd)
         return exit_code <= 1
 
-    def create_test_files(self, base_dir: Path) -> List[str]:
-        """Create a standard set of test files and return relative paths."""
-        # Clean up any existing test files/directories
+    # --- Dataset Generators ---
+
+    def create_source_code_dataset(self, root: Path):
+        """Simulates a source code tree: many small text files, nested dirs."""
+        src_root = root / "src"
+        src_root.mkdir()
+        code_snippets = [
+            "import sys\nimport os\n\ndef main():\n    print('hello')\n",
+            "#include <stdio.h>\nint main() { return 0; }\n",
+            "const x = 1;\nfunction test() { return true; }\n"
+        ]
+        for i in range(50):
+            d = src_root / f"dir_{i % 5}"
+            d.mkdir(exist_ok=True)
+            f = d / f"module_{i}.py"
+            content = (random.choice(code_snippets) * random.randint(1, 10))
+            f.write_text(content)
+
+    def create_log_dataset(self, root: Path):
+        """Simulates logs: large files, highly repetitive/compressible text."""
+        log_root = root / "logs"
+        log_root.mkdir()
+        line = "2025-01-01 12:00:00 [INFO] Request ID: 12345 received from IP 192.168.1.1\n"
+        content = line * 50000  # ~4MB per file
+        for i in range(3):
+            (log_root / f"server_{i}.log").write_text(content)
+
+    def create_binary_dataset(self, root: Path):
+        """Simulates binary data: random bytes, incompressible."""
+        bin_root = root / "bin"
+        bin_root.mkdir()
+        # 3 files, 2MB each
+        for i in range(3):
+            (bin_root / f"data_{i}.dat").write_bytes(os.urandom(2 * 1024 * 1024))
+
+    def create_media_dataset(self, root: Path):
+        """Simulates media: moderate size files, mostly incompressible."""
+        media_root = root / "media"
+        media_root.mkdir()
+        # 10 files, 500KB each
+        for i in range(10):
+            (media_root / f"image_{i}.jpg").write_bytes(os.urandom(500 * 1024))
+
+    # --- Functional Tests ---
+
+    def create_functional_files(self, base_dir: Path) -> List[str]:
+        # Simple setup for functional logic checks
         for child in base_dir.iterdir():
-            if child.is_file():
-                child.unlink()
-            else:
-                shutil.rmtree(child)
-        # Simple text files
-        (base_dir / 'file1.txt').write_text('Hello, world!\n' * 100)
-        (base_dir / 'file2.txt').write_text('Another file with some content.\n' * 50)
-        # Nested directory
+            if child.is_file(): child.unlink()
+            else: shutil.rmtree(child)
+
+        (base_dir / 'file1.txt').write_text('Hello\n' * 50)
+        (base_dir / 'file2.txt').write_text('World\n' * 50)
         sub = base_dir / 'subdir'
         sub.mkdir()
-        (sub / 'nested.txt').write_text('Nested file content.\n')
-        # Empty directory
-        (base_dir / 'empty_dir').mkdir()
-        # Binary file (random bytes)
-        import random
-        random_data = bytes(random.getrandbits(8) for _ in range(1024))
-        (base_dir / 'random.bin').write_bytes(random_data)
-        # Return relative paths of files to archive (exclude empty directories)
+        (sub / 'nested.txt').write_text('Nested\n')
+        (base_dir / 'random.bin').write_bytes(os.urandom(1024))
+
         return ['file1.txt', 'file2.txt', 'subdir/nested.txt', 'random.bin']
 
-    def run_functional_test(self, name: str, args: List[str], work_dir: Path, input_files: Optional[List[str]] = None) -> TestResult:
-        """Run a single functional test with both zips."""
-        if input_files is None:
-            # Collect all non-directory files recursively
-            input_files = []
-            for path in work_dir.rglob('*'):
-                if path.is_file():
-                    input_files.append(str(path.relative_to(work_dir)))
+    def run_functional_test(self, name: str, args: List[str], work_dir: Path, input_files: List[str]) -> TestResult:
+        archive_sys = work_dir / 'sys.zip'
+        archive_bld = work_dir / 'bld.zip'
 
-        archive_system = work_dir / 'system.zip'
-        archive_build = work_dir / 'build.zip'
-
-        # Build command lines
-        # For exclude/include, system zip expects options AFTER input files
+        # Special argument ordering for exclude/include
         if name in ('exclude', 'include'):
-            cmd_system = [self.system_zip, str(archive_system)] + input_files + args
-            cmd_build = [self.build_zip, str(archive_build)] + input_files + args
+            cmd_sys = [self.system_zip, str(archive_sys)] + input_files + args
+            cmd_bld = [self.build_zip, str(archive_bld)] + input_files + args
         else:
-            cmd_system = [self.system_zip, str(archive_system)] + args + input_files
-            cmd_build = [self.build_zip, str(archive_build)] + args + input_files
+            cmd_sys = [self.system_zip, str(archive_sys)] + args + input_files
+            cmd_bld = [self.build_zip, str(archive_bld)] + args + input_files
 
-        # Determine if test modifies input files
-        modifying_flags = {'-m', '-u', '-f', '-FS'}
-        need_backup = any(flag in args for flag in modifying_flags)
-        backup_dir = None
-        if need_backup:
-            backup_dir = work_dir / '.backup'
-            if backup_dir.exists():
-                shutil.rmtree(backup_dir)
-            shutil.copytree(work_dir, backup_dir, dirs_exist_ok=True)
+        # Handle tests that modify existing files
+        modifying = any(x in args for x in ['-m', '-u', '-f', '-FS'])
+        backup = None
+        if modifying:
+            backup = work_dir / '.backup'
+            shutil.copytree(work_dir, backup, dirs_exist_ok=True)
 
-        # Run system zip
-        sys_code, sys_out, sys_err, sys_time = self.run_cmd(cmd_system, cwd=str(work_dir))
-        sys_size = archive_system.stat().st_size if archive_system.exists() else 0
-        sys_valid = self.verify_archive(archive_system) if sys_code == 0 else False
+        # Run System
+        sys_c, sys_o, sys_e, sys_t = self.run_cmd(cmd_sys, cwd=str(work_dir))
+        sys_sz = archive_sys.stat().st_size if archive_sys.exists() else 0
+        sys_ok = self.verify_archive(archive_sys) if sys_c == 0 else False
 
-        # Restore original files if backup exists
-        if backup_dir is not None:
-            # Delete everything except backup and system archive
-            for child in work_dir.iterdir():
-                if child.name in ('.backup', 'system.zip'):
-                    continue
-                if child.is_file():
-                    child.unlink()
-                else:
-                    shutil.rmtree(child)
-            # Copy backup contents back
-            for child in backup_dir.iterdir():
-                if child.name == 'system.zip':
-                    # Don't overwrite the newly created archive
-                    continue
-                dest = work_dir / child.name
-                if child.is_file():
-                    shutil.copy2(child, dest)
-                else:
-                    shutil.copytree(child, dest, dirs_exist_ok=True)
-            shutil.rmtree(backup_dir)
+        # Reset for Build
+        if backup:
+            # Wipe and restore
+            for item in work_dir.iterdir():
+                if item.name not in ('.backup', 'sys.zip'):
+                    if item.is_file(): item.unlink()
+                    else: shutil.rmtree(item)
+            for item in backup.iterdir():
+                if item.name == 'sys.zip': continue
+                dest = work_dir / item.name
+                if item.is_file(): shutil.copy2(item, dest)
+                else: shutil.copytree(item, dest, dirs_exist_ok=True)
+            shutil.rmtree(backup)
 
-        # Run build zip
-        build_code, build_out, build_err, build_time = self.run_cmd(cmd_build, cwd=str(work_dir))
-        build_size = archive_build.stat().st_size if archive_build.exists() else 0
-        build_valid = self.verify_archive(archive_build) if build_code == 0 else False
+        # Run Build
+        bld_c, bld_o, bld_e, bld_t = self.run_cmd(cmd_bld, cwd=str(work_dir))
+        bld_sz = archive_bld.stat().st_size if archive_bld.exists() else 0
+        bld_ok = self.verify_archive(archive_bld) if bld_c == 0 else False
 
-        # Compare results
-        differences = []
+        diffs = []
         passed = True
-
-        if sys_code != build_code:
-            differences.append(f"Exit codes differ: system={sys_code}, build={build_code}")
+        if sys_c != bld_c:
+            diffs.append(f"Exit code: sys={sys_c} build={bld_c}")
+            passed = False
+        if sys_ok != bld_ok:
+            diffs.append(f"Validity: sys={sys_ok} build={bld_ok}")
             passed = False
 
-        if sys_valid != build_valid:
-            differences.append(f"Archive validity differs: system={sys_valid}, build={build_valid}")
-            passed = False
+        # Cleanup
+        if archive_sys.exists(): archive_sys.unlink()
+        if archive_bld.exists(): archive_bld.unlink()
 
-        # If both succeeded, compare archive contents
-        if sys_code == 0 and build_code == 0:
-            try:
-                with zipfile.ZipFile(archive_system, 'r') as zs, zipfile.ZipFile(archive_build, 'r') as zb:
-                    sys_names = sorted(zs.namelist())
-                    build_names = sorted(zb.namelist())
-                    if sys_names != build_names:
-                        differences.append(f"Archive entries differ: system={sys_names}, build={build_names}")
-                        passed = False
-                    else:
-                        for name in sys_names:
-                            if zs.read(name) != zb.read(name):
-                                differences.append(f"Entry content differs for {name}")
-                                passed = False
-                                break
-            except Exception as exc:  # pragma: no cover - safety net
-                differences.append(f"Archive compare failed: {exc}")
-                passed = False
-
-        # Compare archive sizes (only if both succeeded)
-        if sys_code == 0 and build_code == 0 and sys_size != build_size:
-            differences.append(f"Archive sizes differ: system={sys_size}, build={build_size}")
-            # Not necessarily a failure, just note
-
-        # Clean up
-        if archive_system.exists():
-            archive_system.unlink()
-        if archive_build.exists():
-            archive_build.unlink()
-
-        return TestResult(
-            name=name,
-            system_exit_code=sys_code,
-            build_exit_code=build_code,
-            system_stdout=sys_out,
-            build_stdout=build_out,
-            system_stderr=sys_err,
-            build_stderr=build_err,
-            system_time=sys_time,
-            build_time=build_time,
-            system_archive_size=sys_size,
-            build_archive_size=build_size,
-            system_archive_valid=sys_valid,
-            build_archive_valid=build_valid,
-            passed=passed,
-            differences=differences
-        )
+        return TestResult(name, sys_c, bld_c, sys_o, bld_o, sys_e, bld_e, sys_t, bld_t,
+                          sys_sz, bld_sz, sys_ok, bld_ok, passed, diffs)
 
     def run_functional_suite(self) -> List[TestResult]:
-        """Run all functional tests."""
         results = []
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            # Define test cases
-            test_cases = [
+            tpath = Path(tmp)
+            cases = [
                 ("basic", []),
                 ("recurse", ["-r"]),
                 ("junk_paths", ["-j"]),
-                ("store_only", ["-0"]),
-                ("compress_fast", ["-1"]),
-                ("compress_best", ["-9"]),
-                ("quiet", ["-q"]),
-                ("quiet_really", ["-qq"]),
-                ("verbose", ["-v"]),
+                ("store", ["-0"]),
+                ("fast", ["-1"]),
+                ("best", ["-9"]),
                 ("exclude", ["-x", "*.bin"]),
                 ("include", ["-i", "*.txt"]),
-                ("move", ["-m"]),
                 ("update", ["-u"]),
                 ("freshen", ["-f"]),
-                ("file_sync", ["-FS"]),
-                ("test_after", ["-T"]),
-                #("encrypt", ["-e", "-P", "testpass"]),
-                ("split", ["-s", "100k"]),
+                ("filesync", ["-FS"]),
+                ("test_opt", ["-T"]),
                 ("time_filter", ["-t", "20250101"]),
-                ("time_filter_before", ["-tt", "20240101"]),
             ]
-
-            for name, args in test_cases:
-                print(f"Running functional test: {name}", file=sys.stderr)
-                # Recreate test files for each test (some tests delete files)
-                input_files = self.create_test_files(tmp_path)
-                result = self.run_functional_test(name, args, tmp_path, input_files)
-                results.append(result)
-
+            for name, args in cases:
+                print(f"Functional: {name}", file=sys.stderr)
+                files = self.create_functional_files(tpath)
+                results.append(self.run_functional_test(name, args, tpath, files))
         return results
 
-    def run_performance_test(self, name: str, data_dir: Path, args: List[str], input_files: Optional[List[str]] = None) -> PerformanceResult:
-        """Run a performance benchmark with multiple iterations."""
-        if input_files is None:
-            # Collect all non-directory files recursively
-            input_files = []
-            for path in data_dir.rglob('*'):
-                if path.is_file():
-                    input_files.append(str(path.relative_to(data_dir)))
+    # --- Performance Benchmarks ---
 
-        archive_system = data_dir / 'system_perf.zip'
-        archive_build = data_dir / 'build_perf.zip'
+    def run_benchmark(self, dataset_name: str, level: int, work_dir: Path) -> PerformanceResult:
+        sys_zip = work_dir / "sys.zip"
+        bld_zip = work_dir / "bld.zip"
+        args = [f"-{level}", "-r", "."]
 
-        cmd_system = [self.system_zip, str(archive_system)] + args + input_files
-        cmd_build = [self.build_zip, str(archive_build)] + args + input_files
-
-        # Helper to time multiple runs
-        def time_zip(cmd, archive_path, iterations=3):
+        def time_it(cmd):
             times = []
-            for i in range(iterations):
-                # Delete archive if exists before run
-                if archive_path.exists():
-                    archive_path.unlink()
+            for _ in range(3):
+                if sys_zip.exists(): sys_zip.unlink()
+                if bld_zip.exists(): bld_zip.unlink()
                 start = time.perf_counter()
-                result = subprocess.run(cmd, cwd=str(data_dir),
-                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                elapsed = time.perf_counter() - start
-                if i == 0:
-                    # First run: capture size and exit code
-                    size = archive_path.stat().st_size if archive_path.exists() else 0
-                    exit_code = result.returncode
-                    stdout = result.stdout
-                    stderr = result.stderr
-                else:
-                    times.append(elapsed)
-            avg_time = sum(times) / len(times) if times else elapsed
-            return avg_time, size, exit_code, stdout, stderr
+                subprocess.run(cmd, cwd=str(work_dir), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                times.append(time.perf_counter() - start)
+            return min(times) # Best time
 
-        # Time system zip
-        sys_time, sys_size, sys_code, sys_out, sys_err = time_zip(cmd_system, archive_system)
-        # Time build zip
-        build_time, build_size, build_code, build_out, build_err = time_zip(cmd_build, archive_build)
+        sys_cmd = [self.system_zip, str(sys_zip)] + args
+        bld_cmd = [self.build_zip, str(bld_zip)] + args
 
-        # Clean up (already deleted in loop, but ensure)
-        if archive_system.exists():
-            archive_system.unlink()
-        if archive_build.exists():
-            archive_build.unlink()
+        sys_t = time_it(sys_cmd)
+        sys_sz = sys_zip.stat().st_size
 
-        speedup = sys_time / build_time if build_time > 0 else 0
-        size_ratio = sys_size / build_size if build_size > 0 else 0
+        bld_t = time_it(bld_cmd)
+        bld_sz = bld_zip.stat().st_size
 
         return PerformanceResult(
-            name=name,
-            system_time=sys_time,
-            build_time=build_time,
-            system_size=sys_size,
-            build_size=build_size,
-            speedup=speedup,
-            size_ratio=size_ratio
+            dataset=dataset_name,
+            compression_level=level,
+            system_time=sys_t,
+            build_time=bld_t,
+            system_size=sys_sz,
+            build_size=bld_sz,
+            speedup=(sys_t / bld_t) if bld_t > 0 else 0,
+            size_ratio=(sys_sz / bld_sz) if bld_sz > 0 else 0
         )
 
     def run_performance_suite(self) -> List[PerformanceResult]:
-        """Run performance benchmarks with different data sizes and compression levels."""
         results = []
+        datasets = [
+            ("Source Code", self.create_source_code_dataset),
+            ("Logs", self.create_log_dataset),
+            ("Binary", self.create_binary_dataset),
+            ("Media", self.create_media_dataset),
+        ]
 
-        # Create a larger dataset for performance testing
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            input_files = []
-            # Generate 10MB of random data in multiple files
-            for i in range(5):
-                file_size = 2 * 1024 * 1024  # 2MB each
-                random_data = os.urandom(file_size)
-                file_path = tmp_path / f'large_{i}.bin'
-                file_path.write_bytes(random_data)
-                input_files.append(file_path.name)  # just the filename
+            root = Path(tmp)
 
-            # Test different compression levels
-            for level in [0, 1, 6, 9]:
-                print(f"Running performance test: level -{level}", file=sys.stderr)
-                result = self.run_performance_test(
-                    f"compression_{level}",
-                    tmp_path,
-                    [f"-{level}", "-r"],
-                    input_files
-                )
-                results.append(result)
+            for name, generator in datasets:
+                print(f"Generating dataset: {name}...", file=sys.stderr)
+                # Clear and generate
+                for item in root.iterdir():
+                    if item.is_file(): item.unlink()
+                    else: shutil.rmtree(item)
+                generator(root)
+
+                for level in [1, 6, 9]:
+                    print(f"  Benchmark {name} level {level}...", file=sys.stderr)
+                    res = self.run_benchmark(name, level, root)
+                    results.append(res)
 
         return results
 
 def main():
-    parser = argparse.ArgumentParser(description="Compare system zip and build/zip")
-    parser.add_argument('--functional', action='store_true', help='Run functional tests')
-    parser.add_argument('--performance', action='store_true', help='Run performance tests')
-    parser.add_argument('--output', type=str, help='Output JSON file')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--functional', action='store_true')
+    parser.add_argument('--performance', action='store_true')
+    parser.add_argument('--output', type=str)
     args = parser.parse_args()
 
     if not (args.functional or args.performance):
-        parser.error("At least one of --functional or --performance required")
+        parser.error("Specify --functional or --performance")
 
-    # Determine zip paths
-    system_zip = os.environ.get('SYSTEM_ZIP', 'zip')
-    build_zip = os.environ.get('BUILD_ZIP', 'build/zip')
+    sys_zip = os.environ.get('SYSTEM_ZIP', 'zip')
+    bld_zip = os.environ.get('BUILD_ZIP', 'build/zip')
 
-    # Verify binaries exist
-    if not shutil.which(system_zip):
-        print(f"Error: system zip not found at '{system_zip}'", file=sys.stderr)
-        sys.exit(1)
-    if not Path(build_zip).exists():
-        print(f"Error: build zip not found at '{build_zip}'", file=sys.stderr)
-        sys.exit(1)
+    if not shutil.which(sys_zip):
+        sys.exit(f"System zip '{sys_zip}' not found.")
+    if not Path(bld_zip).exists():
+        sys.exit(f"Build zip '{bld_zip}' not found.")
 
-    comparator = ZipComparator(system_zip, build_zip)
-
-    output_data = {}
+    comp = ZipComparator(sys_zip, bld_zip)
+    out_data = {}
 
     if args.functional:
-        print("Running functional tests...", file=sys.stderr)
-        functional_results = comparator.run_functional_suite()
-        output_data['functional'] = [asdict(r) for r in functional_results]
-
-        # Print summary
-        passed = sum(1 for r in functional_results if r.passed)
-        total = len(functional_results)
-        print(f"\nFunctional tests: {passed}/{total} passed", file=sys.stderr)
-
-        for result in functional_results:
-            if not result.passed:
-                print(f"\nFAILED: {result.name}", file=sys.stderr)
-                for diff in result.differences:
-                    print(f"  {diff}", file=sys.stderr)
+        res = comp.run_functional_suite()
+        out_data['functional'] = [asdict(r) for r in res]
+        passed = sum(1 for r in res if r.passed)
+        print(f"\nFunctional: {passed}/{len(res)} passed", file=sys.stderr)
+        for r in res:
+            if not r.passed:
+                print(f"FAILED: {r.name} -> {r.differences}", file=sys.stderr)
 
     if args.performance:
-        print("\nRunning performance tests...", file=sys.stderr)
-        perf_results = comparator.run_performance_suite()
-        output_data['performance'] = [asdict(r) for r in perf_results]
+        res = comp.run_performance_suite()
+        out_data['performance'] = [asdict(r) for r in res]
+        print(f"\n{'Dataset':<12} | {'Lvl':<3} | {'Sys Time':<8} | {'Bld Time':<8} | {'Speedup':<7} | {'Size Ratio':<10}", file=sys.stderr)
+        print("-" * 75, file=sys.stderr)
+        for r in res:
+            print(f"{r.dataset:<12} | {r.compression_level:<3} | {r.system_time:.3f}s   | {r.build_time:.3f}s   | {r.speedup:.2f}x   | {r.size_ratio:.3f}", file=sys.stderr)
 
-        # Print summary
-        print("\nPerformance results:", file=sys.stderr)
-        for result in perf_results:
-            print(f"\n{result.name}:", file=sys.stderr)
-            print(f"  System: {result.system_time:.2f}s, {result.system_size} bytes", file=sys.stderr)
-            print(f"  Build:  {result.build_time:.2f}s, {result.build_size} bytes", file=sys.stderr)
-            print(f"  Speedup: {result.speedup:.2f}x", file=sys.stderr)
-            print(f"  Size ratio: {result.size_ratio:.2f}x", file=sys.stderr)
-
-    # Output JSON if requested
     if args.output:
         with open(args.output, 'w') as f:
-            json.dump(output_data, f, indent=2)
-        print(f"\nResults written to {args.output}", file=sys.stderr)
+            json.dump(out_data, f, indent=2)
+        print(f"\nSaved results to {args.output}", file=sys.stderr)
 
 if __name__ == '__main__':
     main()

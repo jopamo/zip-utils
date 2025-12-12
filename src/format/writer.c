@@ -447,11 +447,6 @@ static bool should_compress_file(ZContext* ctx, const zu_input_info* info, const
     if (path && should_store_by_suffix(ctx, path)) {
         return false;
     }
-    /* Mimic Info-ZIP heuristics: tiny files are stored to avoid overhead. */
-    /* For stdin staging, stick to deflate to match upstream filter-mode output. */
-    if (info && info->size_known && !info->is_stdin && info->st.st_size <= 4096) {
-        return false;
-    }
     return true;
 }
 
@@ -1465,6 +1460,15 @@ static int write_stdin_staged_entry(ZContext* ctx,
         uncomp_size = uncomp_tmp;
         comp_size = comp_tmp;
         payload = staged_comp;
+        /* Store instead of deflating when compression fails to shrink the data. */
+        if (comp_size >= uncomp_size) {
+            fclose(staged_comp);
+            staged_comp = NULL;
+            payload = staged.file;
+            comp_size = uncomp_size;
+            method = 0;
+            compress = false;
+        }
     }
 
     zu_zipcrypto_ctx zc;
@@ -2248,6 +2252,14 @@ int zu_modify_archive(ZContext* ctx) {
 
                 if (compress) {
                     rc = compress_to_temp(ctx, path, method, ctx->compression_level, &staged, &crc, &uncomp_size, &comp_size);
+                    /* Fall back to storing when compression is not effective. */
+                    if (rc == ZU_STATUS_OK && comp_size >= uncomp_size) {
+                        fclose(staged);
+                        staged = NULL;
+                        method = 0;
+                        compress = false;
+                        comp_size = uncomp_size;
+                    }
                 }
                 else if (is_symlink) {
                     crc = zu_crc32((const uint8_t*)info.link_target, info.link_target_len, 0);
