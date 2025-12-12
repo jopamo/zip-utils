@@ -1557,8 +1557,19 @@ int zu_modify_archive(ZContext* ctx) {
         }
     }
 
-    /* Check if any files were added/updated */
-    if (added == 0 && !ctx->difference_mode) {
+    bool existing_changes = false;
+    if (existing_loaded) {
+        for (size_t i = 0; i < ctx->existing_entries.len; ++i) {
+            zu_existing_entry* e = (zu_existing_entry*)ctx->existing_entries.items[i];
+            if (e->changed) {
+                existing_changes = true;
+                break;
+            }
+        }
+    }
+
+    /* Check if any files were added/updated or metadata changed */
+    if (added == 0 && !ctx->difference_mode && !existing_changes && !ctx->zip_comment_specified) {
         rc = ZU_STATUS_NO_FILES;
         goto cleanup;
     }

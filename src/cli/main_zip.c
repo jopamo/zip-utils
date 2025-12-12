@@ -370,6 +370,7 @@ static int zipnote_apply(ZContext* ctx) {
         free(existing->comment);
         existing->comment = e->comment;
         existing->comment_len = (uint16_t)e->comment_len;
+        existing->changed = true;
         e->comment = NULL;
     }
 
