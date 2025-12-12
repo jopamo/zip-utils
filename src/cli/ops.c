@@ -18,7 +18,11 @@ int zu_zip_run(ZContext* ctx) {
 
     // If testing and no inputs, run test
     if (ctx->test_integrity && ctx->include.len == 0) {
-        return zu_test_archive(ctx);
+        int test_rc = zu_test_archive(ctx);
+        if (test_rc == ZU_STATUS_OK && !ctx->quiet) {
+            printf("test of %s OK\n", ctx->archive_path);
+        }
+        return test_rc;
     }
 
     // Allow comment-only updates via -z even when no inputs are provided.
@@ -45,8 +49,12 @@ int zu_zip_run(ZContext* ctx) {
         // HACK: swap archive_path
         const char* old_path = ctx->archive_path;
         ctx->archive_path = target;
-        rc = zu_test_archive(ctx);
+        int test_rc = zu_test_archive(ctx);
         ctx->archive_path = old_path;
+        if (test_rc == ZU_STATUS_OK && !ctx->quiet) {
+            printf("test of %s OK\n", target);
+        }
+        rc = test_rc;
     }
     return rc;
 }

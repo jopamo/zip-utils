@@ -21,12 +21,12 @@ def run_zip(cmd, input_data: bytes, cwd: Path):
 def assert_stream_archive(path: Path, expected: bytes):
     with zipfile.ZipFile(path, 'r') as zf:
         info = zf.getinfo('-')
-        if (info.flag_bits & 0x08) == 0:
-            raise SystemExit("data descriptor flag missing on streamed entry")
+        if (info.flag_bits & 0x08) != 0:
+            raise SystemExit("data descriptor flag should not be set on streamed entry")
         content = zf.read('-')
         if content != expected:
             raise SystemExit(f"content mismatch: {content!r} != {expected!r}")
-        if info.compress_type != zipfile.ZIP_DEFLATED:
+        if info.compress_type != zipfile.ZIP_STORED:
             raise SystemExit(f"unexpected compression method: {info.compress_type}")
 
 

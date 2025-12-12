@@ -26,13 +26,8 @@ const char* zu_status_str(int code) {
 }
 
 void zu_log(ZContext* ctx, const char* fmt, ...) {
-    if (!ctx)
+    if (!ctx || !fmt)
         return;
-
-    // Determine if we should log based on context settings
-    // Default to logging if verbose, or if it's an info message and -li is set?
-    // The caller should control "info" level vs "error" level?
-    // For now, this is a generic log function.
 
     va_list args;
 
@@ -44,9 +39,7 @@ void zu_log(ZContext* ctx, const char* fmt, ...) {
         fflush(ctx->log_file);
     }
 
-    // Also print to stdout if verbose is enabled, to mirror zip behavior
-    // (zip -v outputs details).
-    // However, the original code prints to stdout/stderr directly in some places.
-    // We should be careful not to double print.
-    // For this task, we enable logging to file.
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
 }

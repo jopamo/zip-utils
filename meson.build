@@ -1,7 +1,7 @@
 project(
   'zip-utils',
   'c',
-  version: '6.0-modern',
+  version: '3.0-compat-dev',
   default_options: [
     'c_std=c99',
     'warning_level=2',
@@ -187,15 +187,6 @@ test('integration-quiet-pager', python3,
     'UNZIP_BIN': unzip_exe.full_path()
   },
   timeout: 30
-)
-
-test('integration-split-read', python3,
-  args: [meson.project_source_root() / 'tests/test_split_read.py'],
-  env: {
-    'WRITE_BIN': zip_exe.full_path(),
-    'UNZIP_BIN': unzip_exe.full_path()
-  },
-  timeout: 60
 )
 
 test('integration-zipnote-edit', python3,

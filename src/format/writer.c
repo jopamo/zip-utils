@@ -7,6 +7,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
@@ -26,6 +27,18 @@
 
 #define ZU_EXTRA_ZIP64 0x0001
 #define ZU_IO_CHUNK (64 * 1024)
+
+static const char* compression_method_name(uint16_t method) {
+    switch (method) {
+        case 0:
+            return "store";
+        case 12:
+            return "bzip2";
+        case 8:
+        default:
+            return "deflate";
+    }
+}
 
 /* Extra fields that store platform attributes we drop when -X is set.
    Keep structural extras (e.g., Zip64) so entries stay readable. */
@@ -110,7 +123,9 @@ typedef struct {
     uint16_t mod_date;
     uint32_t ext_attr;     /* External file attributes */
     uint16_t version_made; /* Version made by */
+    uint16_t int_attr;     /* Internal file attributes */
     bool zip64;
+    uint32_t disk_start;
     char* comment;
     uint16_t comment_len;
 } zu_writer_entry;
@@ -394,104 +409,105 @@ static uint64_t zip64_trigger_bytes(void) {
     return (uint64_t)UINT32_MAX + 1ULL;
 }
 
-/* -------------------------------------------------------------------------
- * Split Archive Helpers
- * ------------------------------------------------------------------------- */
-
-static char* get_split_path(const char* base, uint32_t index) {
-    char* path = strdup(base);
-    if (!path)
-        return NULL;
-
-    /* If base is "archive.zip.tmp" and index is 1, we want "archive.z01.tmp" */
-    char* zip = strstr(path, ".zip");
-    if (zip) {
-        zip[1] = 'z';
-        zip[2] = (char)('0' + (index / 10) % 10);
-        zip[3] = (char)('0' + (index % 10));
-    }
-    else {
-        // Fallback: insert .zXX before last .tmp
-        size_t len = strlen(path);
-        if (len > 4 && strcmp(path + len - 4, ".tmp") == 0) {
-            char* new_path = malloc(len + 5);
-            if (new_path) {
-                strncpy(new_path, path, len - 4);
-                sprintf(new_path + len - 4, ".z%02d.tmp", index);
-                free(path);
-                path = new_path;
-            }
-        }
-    }
-    return path;
+static uint32_t current_disk_index(const ZContext* ctx) {
+    (void)ctx;
+    return 0;
 }
 
-static int zu_open_next_split(ZContext* ctx) {
-    if (ctx->out_file) {
-        fclose(ctx->out_file);
-        ctx->out_file = NULL;
+static bool should_compress_file(ZContext* ctx, const zu_input_info* info, const char* path) {
+    if (!ctx) {
+        return false;
     }
-
-    ctx->split_disk_index++;
-    char* next_path = get_split_path(ctx->temp_write_path, ctx->split_disk_index);
-    if (!next_path)
-        return ZU_STATUS_OOM;
-
-    ctx->out_file = fopen(next_path, "wb");
-    if (!ctx->out_file) {
-        free(next_path);
-        zu_context_set_error(ctx, ZU_STATUS_IO, "create split file failed");
-        return ZU_STATUS_IO;
+    if (ctx->compression_method == 0 || ctx->compression_level == 0) {
+        return false;
     }
-
-    if (ctx->verbose) {
-        zu_log(ctx, "creating split file: %s\n", next_path);
+    if (ctx->line_mode != ZU_LINE_NONE) {
+        return false; /* Info-ZIP stores when translating lines */
     }
+    if (path && should_store_by_suffix(ctx, path)) {
+        return false;
+    }
+    /* Mimic Info-ZIP heuristics: tiny files are stored to avoid overhead. */
+    if (info && info->size_known && info->st.st_size <= 4096) {
+        return false;
+    }
+    return true;
+}
 
-    free(next_path);
-    ctx->split_written = 0;
-    return ZU_STATUS_OK;
+static void progress_log(ZContext* ctx, const char* fmt, ...) {
+    if (!ctx || !fmt) {
+        return;
+    }
+    if (ctx->quiet) {
+        return;
+    }
+    FILE* stream = ctx->output_to_stdout ? stderr : stdout;
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stream, fmt, args);
+    va_end(args);
+    if (ctx->log_file) {
+        va_start(args, fmt);
+        vfprintf(ctx->log_file, fmt, args);
+        va_end(args);
+        fflush(ctx->log_file);
+    }
+}
+
+static const char* method_label(uint16_t method) {
+    switch (method) {
+        case 0:
+            return "stored";
+        case 12:
+            return "bzipped";
+        case 8:
+        default:
+            return "deflated";
+    }
+}
+
+static int compression_percent(uint64_t comp_size, uint64_t uncomp_size) {
+    if (uncomp_size == 0) {
+        return 0;
+    }
+    int64_t delta = (int64_t)uncomp_size - (int64_t)comp_size;
+    /* Info-ZIP rounds using integer math with an extra digit of precision. */
+    int64_t pct_times_ten = ((delta * 1000) / (int64_t)uncomp_size) + 5;
+    int pct = (int)(pct_times_ten / 10);
+    if (pct < -99)
+        pct = -99;
+    return pct;
+}
+
+static void log_entry_action(ZContext* ctx, const char* action, const char* name, uint16_t method, uint64_t comp_size, uint64_t uncomp_size) {
+    if (!ctx || !action || !name) {
+        return;
+    }
+    const char* label = method_label(method);
+    int pct = compression_percent(comp_size, uncomp_size);
+    progress_log(ctx, "  %s: %s (%s %d%%)\n", action, name, label, pct);
+}
+
+static void log_delete_action(ZContext* ctx, const char* name) {
+    if (!ctx || !name) {
+        return;
+    }
+    progress_log(ctx, "deleting: %s\n", name);
 }
 
 static int zu_write_output(ZContext* ctx, const void* ptr, size_t size) {
-    if (!ctx->out_file)
+    if (!ctx || !ctx->out_file)
         return ZU_STATUS_IO;
 
-    const uint8_t* data = (const uint8_t*)ptr;
-    size_t remaining = size;
-
-    while (remaining > 0) {
-        if (ctx->split_size > 0 && ctx->split_written + remaining > ctx->split_size) {
-            size_t can_write = (size_t)(ctx->split_size - ctx->split_written);
-            if (can_write > 0) {
-                if (fwrite(data, 1, can_write, ctx->out_file) != can_write) {
-                    zu_context_set_error(ctx, ZU_STATUS_IO, "write split failed");
-                    return ZU_STATUS_IO;
-                }
-                ctx->split_written += can_write;
-                data += can_write;
-                remaining -= can_write;
-            }
-
-            if (ctx->split_pause) {
-                printf("Split point reached. Insert disk %d and press Enter...", ctx->split_disk_index + 2);
-                while (getchar() != '\n')
-                    ;
-            }
-
-            if (zu_open_next_split(ctx) != ZU_STATUS_OK) {
-                return ZU_STATUS_IO;
-            }
-        }
-        else {
-            if (fwrite(data, 1, remaining, ctx->out_file) != remaining) {
-                zu_context_set_error(ctx, ZU_STATUS_IO, "write output failed");
-                return ZU_STATUS_IO;
-            }
-            ctx->split_written += remaining;
-            remaining = 0;
-        }
+    if (size == 0) {
+        return ZU_STATUS_OK;
     }
+
+    if (fwrite(ptr, 1, size, ctx->out_file) != size) {
+        zu_context_set_error(ctx, ZU_STATUS_IO, "write output failed");
+        return ZU_STATUS_IO;
+    }
+    ctx->current_offset += size;
     return ZU_STATUS_OK;
 }
 
@@ -509,7 +525,7 @@ static int describe_input(ZContext* ctx, const char* path, zu_input_info* info) 
     if (path_is_stdin(path)) {
         info->is_stdin = true;
         info->size_known = false;
-        info->st.st_mode = S_IFIFO;
+        info->st.st_mode = S_IFIFO | 0600;
         info->st.st_mtime = time(NULL);
         return ZU_STATUS_OK;
     }
@@ -917,12 +933,141 @@ static int write_data_descriptor(ZContext* ctx, uint32_t crc, uint64_t comp_size
     return ZU_STATUS_OK;
 }
 
+typedef struct {
+    char* path;
+    FILE* file;
+    uint64_t size;
+    uint32_t crc32;
+    bool is_text;
+} zu_stdin_stage;
+
+static void free_stdin_stage(zu_stdin_stage* staged) {
+    if (!staged)
+        return;
+    if (staged->file)
+        fclose(staged->file);
+    if (staged->path) {
+        unlink(staged->path);
+        free(staged->path);
+    }
+    staged->file = NULL;
+    staged->path = NULL;
+    staged->size = 0;
+    staged->crc32 = 0;
+    staged->is_text = false;
+}
+
+static int stage_stdin_to_temp(ZContext* ctx, zu_stdin_stage* staged) {
+    if (!ctx || !staged) {
+        return ZU_STATUS_USAGE;
+    }
+    memset(staged, 0, sizeof(*staged));
+
+    const char* dir = ctx->temp_dir ? ctx->temp_dir : P_tmpdir;
+    if (!dir || *dir == '\0') {
+        dir = ".";
+    }
+    char tmpl[PATH_MAX];
+    int n = snprintf(tmpl, sizeof(tmpl), "%s/zipstdin-XXXXXX", dir);
+    if (n <= 0 || (size_t)n >= sizeof(tmpl)) {
+        zu_context_set_error(ctx, ZU_STATUS_IO, "temp path too long for stdin staging");
+        return ZU_STATUS_IO;
+    }
+
+    int fd = mkstemp(tmpl);
+    if (fd < 0) {
+        zu_context_set_error(ctx, ZU_STATUS_IO, "creating temp file for stdin failed");
+        return ZU_STATUS_IO;
+    }
+    FILE* fp = fdopen(fd, "wb+");
+    if (!fp) {
+        close(fd);
+        unlink(tmpl);
+        zu_context_set_error(ctx, ZU_STATUS_IO, "opening temp file for stdin failed");
+        return ZU_STATUS_IO;
+    }
+
+    uint8_t* buf = malloc(ZU_IO_CHUNK);
+    if (!buf) {
+        fclose(fp);
+        unlink(tmpl);
+        zu_context_set_error(ctx, ZU_STATUS_OOM, "allocating stdin staging buffer failed");
+        return ZU_STATUS_OOM;
+    }
+
+    bool prev_cr = false;
+    uint64_t total = 0;
+    uint32_t crc = 0;
+    staged->is_text = true;
+    int rc = ZU_STATUS_OK;
+
+    size_t got = 0;
+    while ((got = fread(buf, 1, ZU_IO_CHUNK, stdin)) > 0) {
+        uint8_t* translated = buf;
+        size_t translated_len = got;
+        if (ctx->line_mode != ZU_LINE_NONE) {
+            rc = translate_buffer(ctx, buf, got, &translated, &translated_len, &prev_cr);
+            if (rc != ZU_STATUS_OK) {
+                break;
+            }
+        }
+        if (staged->is_text) {
+            for (size_t i = 0; i < translated_len; ++i) {
+                if (translated[i] == 0) {
+                    staged->is_text = false;
+                    break;
+                }
+            }
+        }
+        crc = zu_crc32(translated, translated_len, crc);
+        total += translated_len;
+        if (fwrite(translated, 1, translated_len, fp) != translated_len) {
+            rc = ZU_STATUS_IO;
+            zu_context_set_error(ctx, rc, "write to stdin temp failed");
+        }
+        if (translated != buf) {
+            free(translated);
+        }
+        if (rc != ZU_STATUS_OK) {
+            break;
+        }
+    }
+
+    if (rc == ZU_STATUS_OK && ferror(stdin)) {
+        rc = ZU_STATUS_IO;
+        zu_context_set_error(ctx, rc, "read from stdin failed");
+    }
+    if (rc == ZU_STATUS_OK && fflush(fp) != 0) {
+        rc = ZU_STATUS_IO;
+        zu_context_set_error(ctx, rc, "flush stdin temp failed");
+    }
+    if (rc == ZU_STATUS_OK && fseeko(fp, 0, SEEK_SET) != 0) {
+        rc = ZU_STATUS_IO;
+        zu_context_set_error(ctx, rc, "rewind stdin temp failed");
+    }
+
+    free(buf);
+    if (rc != ZU_STATUS_OK) {
+        fclose(fp);
+        unlink(tmpl);
+        return rc;
+    }
+
+    staged->path = strdup(tmpl);
+    staged->file = fp;
+    staged->size = total;
+    staged->crc32 = crc;
+    return ZU_STATUS_OK;
+}
+
 static int write_streaming_entry(ZContext* ctx,
                                  const char* path,
                                  const char* stored,
                                  const zu_input_info* info,
                                  uint16_t dos_time,
                                  uint16_t dos_date,
+                                 uint64_t entry_lho_offset,
+                                 uint32_t entry_disk_start,
                                  uint64_t zip64_trigger,
                                  uint64_t* offset,
                                  zu_entry_list* entries) {
@@ -930,13 +1075,8 @@ static int write_streaming_entry(ZContext* ctx,
         return ZU_STATUS_USAGE;
     }
 
-    bool compress = ctx->compression_level > 0 && ctx->compression_method != 0;
-    if (ctx->line_mode != ZU_LINE_NONE) {
-        compress = false; /* Info-ZIP stores when doing line translation */
-    }
-    if (should_store_by_suffix(ctx, path)) {
-        compress = false;
-    }
+    bool size_unknown = !info->size_known;
+    bool compress = should_compress_file(ctx, info, path);
     if (info->size_known && info->st.st_size == 0) {
         compress = false;
     }
@@ -953,7 +1093,7 @@ static int write_streaming_entry(ZContext* ctx,
 
     size_t name_len = strlen(stored);
     uint16_t version_needed = (method == 0 ? 10 : 20);
-    if (*offset >= zip64_trigger) {
+    if (size_unknown || *offset >= zip64_trigger) {
         version_needed = 45;
     }
 
@@ -1233,22 +1373,187 @@ static int write_streaming_entry(ZContext* ctx,
     entries->items[entries->len].crc32 = crc;
     entries->items[entries->len].comp_size = comp_size;
     entries->items[entries->len].uncomp_size = uncomp_size;
-    entries->items[entries->len].lho_offset = *offset;
+    entries->items[entries->len].lho_offset = entry_lho_offset;
     entries->items[entries->len].method = method;
     entries->items[entries->len].mod_time = dos_time;
     entries->items[entries->len].mod_date = dos_date;
     entries->items[entries->len].ext_attr = ext_attr;
     uint16_t made_field = need_zip64 ? (uint16_t)((version_made & 0xff00u) | 45) : version_made;
     entries->items[entries->len].version_made = made_field;
+    entries->items[entries->len].int_attr = 0;
     entries->items[entries->len].zip64 = need_zip64;
     entries->items[entries->len].flags = flags;
+    entries->items[entries->len].disk_start = entry_disk_start;
     entries->items[entries->len].comment = NULL;
     entries->items[entries->len].comment_len = 0;
     entries->len++;
 
+    log_entry_action(ctx, "adding", stored, method, comp_size, uncomp_size);
+
     uint64_t header_len = sizeof(lho) + name_len + lho.extra_len;
     *offset += header_len + comp_size + desc_len;
     return ZU_STATUS_OK;
+}
+
+static int write_stdin_staged_entry(ZContext* ctx,
+                                    const char* stored,
+                                    const zu_input_info* info,
+                                    uint16_t dos_time,
+                                    uint16_t dos_date,
+                                    uint64_t entry_lho_offset,
+                                    uint32_t entry_disk_start,
+                                    uint64_t* offset,
+                                    zu_entry_list* entries) {
+    if (!ctx || !stored || !info || !offset || !entries) {
+        return ZU_STATUS_USAGE;
+    }
+
+    zu_stdin_stage staged = {0};
+    int rc = stage_stdin_to_temp(ctx, &staged);
+    if (rc != ZU_STATUS_OK) {
+        return rc;
+    }
+
+    zu_input_info staged_info = *info;
+    staged_info.size_known = true;
+    staged_info.is_stdin = false;
+    staged_info.st.st_size = (off_t)staged.size;
+
+    bool compress = should_compress_file(ctx, &staged_info, stored);
+    uint16_t method = compress ? ctx->compression_method : 0;
+    if (method == 0) {
+        compress = false;
+    }
+
+    uint64_t uncomp_size = staged.size;
+    uint64_t comp_size = staged.size;
+    uint32_t crc = staged.crc32;
+    FILE* payload = staged.file;
+    FILE* staged_comp = NULL;
+
+    if (compress) {
+        uint32_t crc_tmp = 0;
+        uint64_t uncomp_tmp = 0, comp_tmp = 0;
+        rc = compress_to_temp(ctx, staged.path, method, ctx->compression_level, &staged_comp, &crc_tmp, &uncomp_tmp, &comp_tmp);
+        if (rc != ZU_STATUS_OK) {
+            free_stdin_stage(&staged);
+            return rc;
+        }
+        crc = crc_tmp;
+        uncomp_size = uncomp_tmp;
+        comp_size = comp_tmp;
+        payload = staged_comp;
+    }
+
+    zu_zipcrypto_ctx zc;
+    zu_zipcrypto_ctx* pzc = NULL;
+    uint16_t flags = 0;
+    uint64_t payload_size = comp_size;
+    if (ctx->encrypt && ctx->password) {
+        flags |= 1;
+        comp_size += 12;
+    }
+
+    uint32_t ext_attr = 0;
+    uint16_t version_made = 20;
+    make_attrs(ctx, &info->st, S_ISDIR(info->st.st_mode), &ext_attr, &version_made);
+    version_made = (uint16_t)((version_made & 0xff00u) | 30);
+    uint16_t int_attr = staged.is_text ? 1 : 0;
+
+    size_t name_len = strlen(stored);
+    uint16_t extra_len = (uint16_t)(4 + 2 * sizeof(uint64_t)); /* Zip64 sizes */
+
+    zu_local_header lho = {
+        .signature = ZU_SIG_LOCAL,
+        .version_needed = 45,
+        .flags = flags,
+        .method = method,
+        .mod_time = dos_time,
+        .mod_date = dos_date,
+        .crc32 = crc,
+        .comp_size = 0xffffffffu,
+        .uncomp_size = 0xffffffffu,
+        .name_len = (uint16_t)name_len,
+        .extra_len = extra_len,
+    };
+
+    if (zu_write_output(ctx, &lho, sizeof(lho)) != ZU_STATUS_OK || zu_write_output(ctx, stored, name_len) != ZU_STATUS_OK) {
+        zu_context_set_error(ctx, ZU_STATUS_IO, "write local header failed");
+        rc = ZU_STATUS_IO;
+        goto cleanup;
+    }
+
+    uint16_t header_id = ZU_EXTRA_ZIP64;
+    uint16_t data_len = 16;
+    uint64_t sizes[2] = {uncomp_size, comp_size};
+    if (zu_write_output(ctx, &header_id, 2) != ZU_STATUS_OK || zu_write_output(ctx, &data_len, 2) != ZU_STATUS_OK || zu_write_output(ctx, sizes, sizeof(sizes)) != ZU_STATUS_OK) {
+        zu_context_set_error(ctx, ZU_STATUS_IO, "write Zip64 extra failed");
+        rc = ZU_STATUS_IO;
+        goto cleanup;
+    }
+
+    if (ctx->encrypt && ctx->password) {
+        zu_zipcrypto_init(&zc, ctx->password);
+        pzc = &zc;
+        uint8_t header[12];
+        for (int k = 0; k < 12; ++k)
+            header[k] = (uint8_t)(rand() & 0xff);
+        header[11] = (uint8_t)(crc >> 24);
+        zu_zipcrypto_encrypt(&zc, header, 12);
+        if (zu_write_output(ctx, header, 12) != ZU_STATUS_OK) {
+            zu_context_set_error(ctx, ZU_STATUS_IO, "write encryption header failed");
+            rc = ZU_STATUS_IO;
+            goto cleanup;
+        }
+    }
+
+    if (payload && fseeko(payload, 0, SEEK_SET) != 0) {
+        zu_context_set_error(ctx, ZU_STATUS_IO, "rewind staged data failed");
+        rc = ZU_STATUS_IO;
+        goto cleanup;
+    }
+
+    rc = write_file_data(ctx, staged.path, payload, payload_size, pzc);
+    if (rc != ZU_STATUS_OK) {
+        goto cleanup;
+    }
+
+    if (ensure_entry_capacity(entries) != ZU_STATUS_OK) {
+        zu_context_set_error(ctx, ZU_STATUS_OOM, "allocating entry list failed");
+        rc = ZU_STATUS_OOM;
+        goto cleanup;
+    }
+
+    entries->items[entries->len].name = strdup(stored);
+    entries->items[entries->len].crc32 = crc;
+    entries->items[entries->len].comp_size = comp_size;
+    entries->items[entries->len].uncomp_size = uncomp_size;
+    entries->items[entries->len].lho_offset = entry_lho_offset;
+    entries->items[entries->len].method = method;
+    entries->items[entries->len].mod_time = dos_time;
+    entries->items[entries->len].mod_date = dos_date;
+    entries->items[entries->len].ext_attr = ext_attr;
+    entries->items[entries->len].version_made = version_made;
+    entries->items[entries->len].int_attr = int_attr;
+    entries->items[entries->len].zip64 = true;
+    entries->items[entries->len].flags = flags;
+    entries->items[entries->len].disk_start = entry_disk_start;
+    entries->items[entries->len].comment = NULL;
+    entries->items[entries->len].comment_len = 0;
+    entries->len++;
+
+    log_entry_action(ctx, "adding", stored, method, comp_size, uncomp_size);
+
+    uint64_t header_len = sizeof(lho) + name_len + extra_len;
+    *offset += header_len + comp_size;
+    rc = ZU_STATUS_OK;
+
+cleanup:
+    if (payload && payload == staged_comp) {
+        fclose(payload);
+    }
+    free_stdin_stage(&staged);
+    return rc;
 }
 
 static int copy_existing_entry(ZContext* ctx, const zu_existing_entry* e, uint64_t* written_out) {
@@ -1419,16 +1724,16 @@ static int write_central_directory(ZContext* ctx, const zu_entry_list* entries, 
         const zu_writer_entry* e = &entries->items[i];
         size_t name_len = strlen(e->name);
 
-        bool entry_zip64 = e->zip64 || e->comp_size > UINT32_MAX || e->uncomp_size > UINT32_MAX || e->lho_offset > UINT32_MAX;
-        if (entry_zip64)
+        bool entry_zip64 = e->zip64;
+        bool need_uncomp64 = entry_zip64 || e->uncomp_size > UINT32_MAX;
+        bool need_comp64 = entry_zip64 || e->comp_size > UINT32_MAX;
+        bool need_off64 = entry_zip64 || e->lho_offset > UINT32_MAX;
+        bool need_zip64_extra = need_uncomp64 || need_comp64 || need_off64;
+        if (entry_zip64 || need_zip64_extra)
             needs_zip64 = true;
 
         uint64_t zip64_vals[3];
         size_t zv = 0;
-        bool need_uncomp64 = entry_zip64 || e->uncomp_size > UINT32_MAX;
-        bool need_comp64 = entry_zip64 || e->comp_size > UINT32_MAX;
-        bool need_off64 = entry_zip64 || e->lho_offset > UINT32_MAX;
-
         if (need_uncomp64)
             zip64_vals[zv++] = e->uncomp_size;
         if (need_comp64)
@@ -1440,9 +1745,10 @@ static int write_central_directory(ZContext* ctx, const zu_entry_list* entries, 
         uint32_t uncomp32 = need_uncomp64 ? 0xffffffffu : (uint32_t)e->uncomp_size;
         uint32_t offset32 = need_off64 ? 0xffffffffu : (uint32_t)e->lho_offset;
 
-        uint16_t extra_len = zv > 0 ? (uint16_t)(4 + zv * sizeof(uint64_t)) : 0;
-        uint16_t version_needed = entry_zip64 ? 45 : (e->method == 0 ? 10 : 20);
+        uint16_t extra_len = need_zip64_extra ? (uint16_t)(4 + zv * sizeof(uint64_t)) : 0;
+        uint16_t version_needed = (entry_zip64 || need_zip64_extra) ? 45 : (e->method == 0 ? 10 : 20);
         uint16_t comment_len = e->comment_len;
+        uint16_t disk_start = (uint16_t)((e->disk_start > 0xffffu) ? 0xffffu : e->disk_start);
 
         zu_central_header ch = {
             .signature = ZU_SIG_CENTRAL,
@@ -1458,25 +1764,11 @@ static int write_central_directory(ZContext* ctx, const zu_entry_list* entries, 
             .name_len = (uint16_t)name_len,
             .extra_len = extra_len,
             .comment_len = comment_len,
-            .disk_start = 0,
-            .int_attr = 0,
+            .disk_start = disk_start,
+            .int_attr = e->int_attr,
             .ext_attr = e->ext_attr,
             .lho_offset = offset32,
         };
-
-        /* For split archives, we need to set disk_start properly */
-        if (ctx->split_size > 0) {
-            /* This is simplified. Ideally we track which disk the LHO is on.
-               The current architecture doesn't easily track LHO disk location.
-               We stored lho_offset as global offset?
-               If lho_offset is global, we need to map it to disk number?
-               Standard zip stores disk number where file starts.
-
-               In this implementation, we don't easily know the disk number for a previous file unless we tracked it.
-               We can add `disk_start` to zu_writer_entry.
-            */
-            // TODO: Track disk number. For now leaving as 0 which is incorrect for multi-volume.
-        }
 
         if (zu_write_output(ctx, &ch, sizeof(ch)) != ZU_STATUS_OK || zu_write_output(ctx, e->name, name_len) != ZU_STATUS_OK) {
             return ZU_STATUS_IO;
@@ -1510,19 +1802,20 @@ static int write_central_directory(ZContext* ctx, const zu_entry_list* entries, 
 }
 
 static int write_end_central(ZContext* ctx, const zu_entry_list* entries, uint64_t cd_offset, uint64_t cd_size, bool needs_zip64, const char* comment, uint16_t comment_len) {
+    (void)ctx;
+    uint16_t disk_id = 0;
     uint16_t entry_count = entries->len > 0xffff ? 0xffff : (uint16_t)entries->len;
     zu_end_central endrec = {
         .signature = ZU_SIG_END,
-        .disk_num = (uint16_t)(ctx->split_disk_index > 0xffff ? 0xffff : ctx->split_disk_index),  // Should be number of this disk
-        .disk_start = 0,                                                                          // Should be disk where CD starts
-        .entries_disk = entry_count,                                                              // Should be entries on this disk
+        .disk_num = disk_id,
+        .disk_start = disk_id,
+        .entries_disk = entry_count,
         .entries_total = entry_count,
-        .cd_size = (needs_zip64 || cd_size > UINT32_MAX) ? 0xffffffffu : (uint32_t)cd_size,
-        .cd_offset = (needs_zip64 || cd_offset > UINT32_MAX) ? 0xffffffffu : (uint32_t)cd_offset,
+        .cd_size = (cd_size > UINT32_MAX) ? 0xffffffffu : (uint32_t)cd_size,
+        .cd_offset = (cd_offset > UINT32_MAX) ? 0xffffffffu : (uint32_t)cd_offset,
         .comment_len = comment_len,
     };
-    /* Fixup split fields if needed */
-    /* Note: Ideally we track disk_start and disk_num properly */
+    /* Disk fields remain zeroed because multi-disk archives are not supported. */
 
     if (zu_write_output(ctx, &endrec, sizeof(endrec)) != ZU_STATUS_OK) {
         return ZU_STATUS_IO;
@@ -1536,13 +1829,22 @@ static int write_end_central(ZContext* ctx, const zu_entry_list* entries, uint64
 }
 
 static int write_end_central64(ZContext* ctx, const zu_entry_list* entries, uint64_t cd_offset, uint64_t cd_size) {
+    (void)ctx;
+    uint32_t disk_count = 1;
+    uint16_t disk_id = 0;
+    uint16_t version_made = 45;
+    for (size_t i = 0; i < entries->len; ++i) {
+        if (entries->items[i].version_made > version_made) {
+            version_made = entries->items[i].version_made;
+        }
+    }
     zu_end_central64 end64 = {
         .signature = ZU_SIG_END64,
         .size = (uint64_t)(sizeof(zu_end_central64) - 12),
-        .version_made = 45,
+        .version_made = version_made,
         .version_needed = 45,
-        .disk_num = ctx->split_disk_index,
-        .disk_start = 0,  // Disk where CD starts
+        .disk_num = disk_id,
+        .disk_start = disk_id,  // Disk where CD starts
         .entries_disk = (uint64_t)entries->len,
         .entries_total = (uint64_t)entries->len,
         .cd_size = cd_size,
@@ -1553,9 +1855,9 @@ static int write_end_central64(ZContext* ctx, const zu_entry_list* entries, uint
     }
     zu_end64_locator locator = {
         .signature = ZU_SIG_END64LOC,
-        .disk_num = ctx->split_disk_index,  // Disk where EOCD64 is
+        .disk_num = disk_id,  // Disk where EOCD64 is
         .eocd64_offset = cd_offset + cd_size,
-        .total_disks = ctx->split_disk_index + 1,
+        .total_disks = disk_count,
     };
     if (zu_write_output(ctx, &locator, sizeof(locator)) != ZU_STATUS_OK) {
         return ZU_STATUS_IO;
@@ -1572,6 +1874,7 @@ int zu_modify_archive(ZContext* ctx) {
         return ZU_STATUS_USAGE;
     }
     srand(time(NULL));
+    ctx->current_offset = 0;
 
     /* 1. Load existing archive if requested and it exists */
     bool existing_loaded = false;
@@ -1602,6 +1905,8 @@ int zu_modify_archive(ZContext* ctx) {
                 zu_existing_entry* e = (zu_existing_entry*)ctx->existing_entries.items[j];
                 if (!e->delete && fnmatch(pattern, e->name, 0) == 0) {
                     e->delete = true;
+                    e->changed = true;
+                    log_delete_action(ctx, e->name);
                 }
             }
         }
@@ -1630,9 +1935,8 @@ int zu_modify_archive(ZContext* ctx) {
                 if (lstat(e->name, &st) != 0) {
                     /* File missing, delete from archive */
                     e->delete = true;
-                    if (ctx->verbose || ctx->log_info) {
-                        zu_log(ctx, "deleting: %s\n", e->name);
-                    }
+                    e->changed = true;
+                    log_delete_action(ctx, e->name);
                 }
             }
         }
@@ -1649,32 +1953,24 @@ int zu_modify_archive(ZContext* ctx) {
     char* temp_path = NULL;
     const char* target_path = ctx->output_path ? ctx->output_path : ctx->archive_path;
 
-    if (ctx->output_to_stdout) {
-        ctx->out_file = stdout;
-    }
-    else {
-        temp_path = make_temp_path(ctx, target_path);
-        if (!temp_path) {
-            return ZU_STATUS_OOM;
-        }
-
-        ctx->temp_write_path = temp_path;  // Store for split logic
-
-        if (ctx->split_size > 0) {
-            ctx->split_disk_index = 0;  // Will be incremented to 1
-            if (zu_open_next_split(ctx) != ZU_STATUS_OK) {
-                zu_context_set_error(ctx, ZU_STATUS_IO, "create split temp file failed");
-                free(temp_path);
-                return ZU_STATUS_IO;
-            }
+    if (!ctx->dry_run) {
+        if (ctx->output_to_stdout) {
+            ctx->out_file = stdout;
+            ctx->current_offset = 0;
         }
         else {
+            temp_path = make_temp_path(ctx, target_path);
+            if (!temp_path) {
+                return ZU_STATUS_OOM;
+            }
+
             ctx->out_file = fopen(temp_path, "wb");
             if (!ctx->out_file) {
                 zu_context_set_error(ctx, ZU_STATUS_IO, "create temp file failed");
                 free(temp_path);
                 return ZU_STATUS_IO;
             }
+            ctx->current_offset = 0;
         }
     }
 
@@ -1692,7 +1988,7 @@ int zu_modify_archive(ZContext* ctx) {
             const char* path = ctx->include.items[i];
             /* Exclude/include pattern filtering */
             if (!zu_should_include(ctx, path)) {
-                if (ctx->verbose || ctx->log_info)
+                if (ctx->verbose || ctx->log_info || ctx->dry_run)
                     zu_log(ctx, "skipping %s (excluded)\n", path);
                 continue;
             }
@@ -1704,7 +2000,7 @@ int zu_modify_archive(ZContext* ctx) {
             zu_input_info info;
             if (describe_input(ctx, path, &info) != ZU_STATUS_OK) {
                 /* If file not found, skip with warning (standard zip behavior). */
-                if (ctx->verbose || ctx->log_info)
+                if (ctx->verbose || ctx->log_info || ctx->dry_run)
                     zu_log(ctx, "zip: %s not found or not readable\n", path);
                 continue;
             }
@@ -1745,7 +2041,7 @@ int zu_modify_archive(ZContext* ctx) {
 
             /* Time Filtering */
             if (ctx->has_filter_after && info.st.st_mtime < ctx->filter_after) {
-                if (ctx->verbose || ctx->log_info)
+                if (ctx->verbose || ctx->log_info || ctx->dry_run)
                     zu_log(ctx, "skipping %s (older than -t)\n", path);
                 if (info.link_target)
                     free(info.link_target);
@@ -1753,7 +2049,7 @@ int zu_modify_archive(ZContext* ctx) {
                 continue;
             }
             if (ctx->has_filter_before && info.st.st_mtime >= ctx->filter_before) {
-                if (ctx->verbose || ctx->log_info)
+                if (ctx->verbose || ctx->log_info || ctx->dry_run)
                     zu_log(ctx, "skipping %s (newer than -tt)\n", path);
                 if (info.link_target)
                     free(info.link_target);
@@ -1775,7 +2071,7 @@ int zu_modify_archive(ZContext* ctx) {
 
                     if (!input_newer) {
                         /* Input is older or same, skip it. Keep existing. */
-                        if (ctx->verbose || ctx->log_info)
+                        if (ctx->verbose || ctx->log_info || ctx->dry_run)
                             zu_log(ctx, "skipping %s (not newer)\n", path);
                         if (info.link_target)
                             free(info.link_target);
@@ -1785,7 +2081,8 @@ int zu_modify_archive(ZContext* ctx) {
                 }
                 /* We are replacing existing. Mark it for deletion. */
                 existing->delete = true;
-                if (ctx->verbose || ctx->log_info)
+                existing->changed = true;
+                if (ctx->verbose || ctx->log_info || ctx->dry_run)
                     zu_log(ctx, "updating: %s\n", entry_name);
                 added++;
             }
@@ -1798,7 +2095,7 @@ int zu_modify_archive(ZContext* ctx) {
                     free(allocated);
                     continue;
                 }
-                if (ctx->verbose || ctx->log_info)
+                if (ctx->verbose || ctx->log_info || ctx->dry_run)
                     zu_log(ctx, "adding: %s\n", entry_name);
                 added++;
             }
@@ -1811,8 +2108,51 @@ int zu_modify_archive(ZContext* ctx) {
             update_newest_mtime(ctx, info.st.st_mtime);
 
             bool streaming = info.is_stdin || !info.size_known || ctx->line_mode != ZU_LINE_NONE;
+            bool compress = false;
+            if (S_ISDIR(info.st.st_mode)) {
+                compress = false;
+            }
+            else if (streaming) {
+                compress = ctx->compression_level > 0 && ctx->compression_method != 0 && ctx->line_mode == ZU_LINE_NONE;
+                if (should_store_by_suffix(ctx, path)) {
+                    compress = false;
+                }
+                if (info.size_known && info.st.st_size == 0) {
+                    compress = false;
+                }
+            }
+            else {
+                compress = should_compress_file(ctx, &info, path);
+                if (info.st.st_size == 0)
+                    compress = false;
+                if (is_symlink) {
+                    compress = false; /* Store symlinks as links, not targets */
+                }
+            }
+            const char* prefix = ctx->dry_run ? "plan" : (existing ? "updating" : "adding");
+            const char* method_desc = compress ? compression_method_name(ctx->compression_method) : "store";
+            if (ctx->verbose || ctx->log_info || ctx->dry_run) {
+                zu_log(ctx, "%s %s via %s%s%s\n", prefix, entry_name, method_desc, streaming ? " (streaming)" : "", is_symlink ? " [symlink]" : (S_ISDIR(info.st.st_mode) ? " [dir]" : ""));
+            }
+
+            if (ctx->dry_run) {
+                if (info.link_target)
+                    free(info.link_target);
+                free(allocated);
+                continue;
+            }
+
+            /* Record the disk/offset where this entry's local header begins before any writes */
+            uint32_t entry_disk_start = current_disk_index(ctx);
+            uint64_t entry_lho_offset = ctx->current_offset;
+
             if (streaming) {
-                rc = write_streaming_entry(ctx, path, entry_name, &info, dos_time, dos_date, zip64_trigger, &offset, &entries);
+                if (info.is_stdin) {
+                    rc = write_stdin_staged_entry(ctx, entry_name, &info, dos_time, dos_date, entry_lho_offset, entry_disk_start, &offset, &entries);
+                }
+                else {
+                    rc = write_streaming_entry(ctx, path, entry_name, &info, dos_time, dos_date, entry_lho_offset, entry_disk_start, zip64_trigger, &offset, &entries);
+                }
                 if (rc != ZU_STATUS_OK)
                     goto cleanup;
                 if (ctx->remove_source && !info.is_stdin) {
@@ -1841,16 +2181,6 @@ int zu_modify_archive(ZContext* ctx) {
                 method = 0;
             }
             else {
-                bool compress = ctx->compression_level > 0;
-                if (info.st.st_size == 0)
-                    compress = false;
-                if (should_store_by_suffix(ctx, path)) {
-                    compress = false;
-                }
-                if (is_symlink) {
-                    compress = false; /* Store symlinks as links, not targets */
-                }
-
                 method = compress ? ctx->compression_method : 0;
                 if (method == 0)
                     compress = false;
@@ -1981,14 +2311,16 @@ int zu_modify_archive(ZContext* ctx) {
             entries.items[entries.len].crc32 = crc;
             entries.items[entries.len].comp_size = comp_size;
             entries.items[entries.len].uncomp_size = uncomp_size;
-            entries.items[entries.len].lho_offset = offset;
+            entries.items[entries.len].lho_offset = entry_lho_offset;
             entries.items[entries.len].method = method;
             entries.items[entries.len].mod_time = dos_time;
             entries.items[entries.len].mod_date = dos_date;
             entries.items[entries.len].ext_attr = ext_attr;
             entries.items[entries.len].version_made = version_made;
+            entries.items[entries.len].int_attr = 0;
             entries.items[entries.len].zip64 = zip64_lho;
             entries.items[entries.len].flags = flags;
+            entries.items[entries.len].disk_start = entry_disk_start;
             entries.items[entries.len].comment = NULL;
             entries.items[entries.len].comment_len = 0;
             if (existing && existing->comment && existing->comment_len > 0) {
@@ -2001,6 +2333,8 @@ int zu_modify_archive(ZContext* ctx) {
                 entries.items[entries.len].comment_len = existing->comment_len;
             }
             entries.len++;
+
+            log_entry_action(ctx, "adding", entry_name, method, comp_size, uncomp_size);
 
             offset += sizeof(lho) + name_len + extra_len + comp_size;
 
@@ -2026,6 +2360,12 @@ int zu_modify_archive(ZContext* ctx) {
     /* Check if any files were added/updated or metadata changed */
     if (added == 0 && !ctx->difference_mode && !existing_changes && !ctx->zip_comment_specified && !ctx->set_archive_mtime) {
         rc = ZU_STATUS_NO_FILES;
+    }
+
+    if (ctx->dry_run) {
+        goto cleanup;
+    }
+    if (rc != ZU_STATUS_OK) {
         goto cleanup;
     }
 
@@ -2043,6 +2383,8 @@ int zu_modify_archive(ZContext* ctx) {
                    So we must not change e->lho_offset before calling it. */
 
                 uint64_t new_offset = offset;
+                uint32_t entry_disk_start = current_disk_index(ctx);
+                uint64_t entry_lho_offset = ctx->current_offset;
                 rc = copy_existing_entry(ctx, e, &written);
                 if (rc != ZU_STATUS_OK)
                     goto cleanup;
@@ -2055,7 +2397,7 @@ int zu_modify_archive(ZContext* ctx) {
                 entries.items[entries.len].crc32 = e->hdr.crc32;
                 entries.items[entries.len].comp_size = e->comp_size;
                 entries.items[entries.len].uncomp_size = e->uncomp_size;
-                entries.items[entries.len].lho_offset = new_offset; /* THE NEW OFFSET */
+                entries.items[entries.len].lho_offset = entry_lho_offset;
                 entries.items[entries.len].method = e->hdr.method;
                 entries.items[entries.len].mod_time = e->hdr.mod_time;
                 entries.items[entries.len].mod_date = e->hdr.mod_date;
@@ -2063,9 +2405,11 @@ int zu_modify_archive(ZContext* ctx) {
                 uint16_t version_made = ctx->exclude_extra_attrs ? (uint16_t)(e->hdr.version_made & 0x00ffu) : e->hdr.version_made;
                 entries.items[entries.len].ext_attr = ext_attr;
                 entries.items[entries.len].version_made = version_made;
+                entries.items[entries.len].int_attr = e->hdr.int_attr;
                 /* Logic to detect zip64 from existing data */
                 entries.items[entries.len].zip64 = (e->comp_size >= 0xffffffffu || e->uncomp_size >= 0xffffffffu || new_offset >= 0xffffffffu);
                 entries.items[entries.len].flags = e->hdr.flags;
+                entries.items[entries.len].disk_start = entry_disk_start;
                 entries.items[entries.len].comment = NULL;
                 entries.items[entries.len].comment_len = 0;
                 if (e->comment && e->comment_len > 0) {
@@ -2086,7 +2430,7 @@ int zu_modify_archive(ZContext* ctx) {
     }
 
     /* 5. Write Central Directory */
-    uint64_t cd_offset = offset;
+    uint64_t cd_offset = ctx->current_offset;
     uint64_t cd_size = 0;
     bool need_zip64 = false;
     rc = write_central_directory(ctx, &entries, cd_offset, &cd_size, &need_zip64);
@@ -2115,73 +2459,19 @@ cleanup:
     ctx->in_file = NULL;
 
     if (rc == ZU_STATUS_OK && temp_path) {
-        if (ctx->split_size > 0) {
-            /* Rename all split parts */
-            /* Current split_disk_index is the last one */
-            for (uint32_t i = 1; i <= ctx->split_disk_index; ++i) {
-                char* old_name = get_split_path(temp_path, i);
-                char* new_name = NULL;
-                if (i == ctx->split_disk_index) {
-                    new_name = strdup(target_path);
-                }
-                else {
-                    new_name = get_split_path(target_path, i);
-                }
-
-                if (rename_or_copy(old_name, new_name) != 0) {
-                    zu_context_set_error(ctx, ZU_STATUS_IO, "rename split part failed");
-                    rc = ZU_STATUS_IO;
-                    free(old_name);
-                    free(new_name);
-                    break;
-                }
-                free(old_name);
-                free(new_name);
-            }
-        }
-        else {
-            if (rename_or_copy(temp_path, target_path) != 0) {
-                zu_context_set_error(ctx, ZU_STATUS_IO, "rename temp file failed");
-                rc = ZU_STATUS_IO;
-            }
+        if (rename_or_copy(temp_path, target_path) != 0) {
+            zu_context_set_error(ctx, ZU_STATUS_IO, "rename temp file failed");
+            rc = ZU_STATUS_IO;
         }
     }
     if (rc == ZU_STATUS_OK && ctx->set_archive_mtime && ctx->newest_mtime_valid && !ctx->output_to_stdout) {
-        if (ctx->split_size > 0) {
-            for (uint32_t i = 1; i <= ctx->split_disk_index; ++i) {
-                char* out_path = (i == ctx->split_disk_index) ? strdup(target_path) : get_split_path(target_path, i);
-                if (!out_path) {
-                    rc = ZU_STATUS_OOM;
-                    break;
-                }
-                if (apply_mtime(out_path, ctx->newest_mtime) != 0) {
-                    zu_context_set_error(ctx, ZU_STATUS_IO, "failed to set archive mtime");
-                    rc = ZU_STATUS_IO;
-                    free(out_path);
-                    break;
-                }
-                free(out_path);
-            }
-        }
-        else {
-            if (apply_mtime(target_path, ctx->newest_mtime) != 0) {
-                zu_context_set_error(ctx, ZU_STATUS_IO, "failed to set archive mtime");
-                rc = ZU_STATUS_IO;
-            }
+        if (apply_mtime(target_path, ctx->newest_mtime) != 0) {
+            zu_context_set_error(ctx, ZU_STATUS_IO, "failed to set archive mtime");
+            rc = ZU_STATUS_IO;
         }
     }
-    else if (temp_path) {
-        /* Cleanup temps on error */
-        if (ctx->split_size > 0) {
-            for (uint32_t i = 1; i <= ctx->split_disk_index; ++i) {
-                char* p = get_split_path(temp_path, i);
-                unlink(p);
-                free(p);
-            }
-        }
-        else {
-            unlink(temp_path);
-        }
+    else if (rc != ZU_STATUS_OK && temp_path) {
+        unlink(temp_path);
     }
 
     free(temp_path);

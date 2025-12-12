@@ -41,36 +41,6 @@ static time_t parse_date(const char* str) {
     return (time_t)-1;
 }
 
-static uint64_t parse_size(const char* str) {
-    char* end;
-    double val = strtod(str, &end);
-    if (end == str || val < 0)
-        return 0;
-
-    uint64_t mult = 1;
-    if (*end) {
-        switch (*end) {
-            case 'k':
-            case 'K':
-                mult = 1024;
-                break;
-            case 'm':
-            case 'M':
-                mult = 1024 * 1024;
-                break;
-            case 'g':
-            case 'G':
-                mult = 1024 * 1024 * 1024;
-                break;
-            case 't':
-            case 'T':
-                mult = 1024ULL * 1024ULL * 1024ULL * 1024ULL;
-                break;
-        }
-    }
-    return (uint64_t)(val * mult);
-}
-
 static int read_stdin_names(ZContext* ctx) {
     char* line = NULL;
     size_t linecap = 0;
@@ -116,6 +86,62 @@ static int map_exit_code(int status) {
             return 3;
         default:
             return 3;
+    }
+}
+
+static void warn_stub(ZContext* ctx, const char* opt, const char* detail) {
+    char buf[256];
+    snprintf(buf, sizeof(buf), "zip: %s is stubbed (Info-ZIP 3.0 parity pending): %s", opt, detail ? detail : "behavior incomplete");
+    zu_warn_once(ctx, buf);
+}
+
+static void emit_zip_stub_warnings(ZContext* ctx, bool invoked_as_zipcloak) {
+    if (ctx->fix_archive || ctx->fix_fix_archive) {
+        warn_stub(ctx, ctx->fix_fix_archive ? "-FF" : "-F", "recovery semantics are still under validation");
+    }
+    if (ctx->exclude_extra_attrs) {
+        warn_stub(ctx, "-X", "extra field stripping differs from Info-ZIP 3.0");
+    }
+    if (ctx->used_long_option) {
+        warn_stub(ctx, "long options", "alias/negation coverage is incomplete; only implemented flags are wired");
+    }
+    if (invoked_as_zipcloak) {
+        warn_stub(ctx, "zipcloak", "only encrypts new writes; existing entries are left untouched");
+    }
+}
+
+static const char* compression_method_name(int method) {
+    switch (method) {
+        case 0:
+            return "store";
+        case 12:
+            return "bzip2";
+        case 8:
+        default:
+            return "deflate";
+    }
+}
+
+static void trace_effective_zip_defaults(ZContext* ctx) {
+    zu_trace_option(ctx, "effective compression: %s level %d", compression_method_name(ctx->compression_method), ctx->compression_level);
+    zu_trace_option(ctx, "paths: %s (recursive %s)", ctx->store_paths ? "preserve" : "junk", ctx->recursive ? "on" : "off");
+    const char* target = ctx->output_to_stdout ? "stdout" : (ctx->output_path ? ctx->output_path : (ctx->archive_path ? ctx->archive_path : "(unset)"));
+    zu_trace_option(ctx, "output target: %s", target);
+    const char* mode = ctx->difference_mode ? "delete" : (ctx->freshen ? "freshen" : (ctx->update ? "update" : (ctx->filesync ? "filesync" : "create/modify")));
+    zu_trace_option(ctx, "mode: %s%s%s%s", mode, ctx->remove_source ? " +move" : "", ctx->encrypt ? " +encrypt" : "", ctx->dry_run ? " +dry-run" : "");
+    zu_trace_option(ctx, "quiet level: %d, verbose: %s", ctx->quiet_level, ctx->verbose ? "on" : "off");
+}
+
+static void emit_option_trace(const char* tool, ZContext* ctx) {
+    if (!(ctx->verbose || ctx->log_info || ctx->dry_run)) {
+        return;
+    }
+    if (ctx->option_events.len == 0) {
+        return;
+    }
+    zu_log(ctx, "%s option resolution:\n", tool);
+    for (size_t i = 0; i < ctx->option_events.len; ++i) {
+        zu_log(ctx, "  %s\n", ctx->option_events.items[i]);
     }
 }
 
@@ -457,6 +483,7 @@ static void print_usage(FILE* to, const char* argv0) {
             "  Output:     -O path (write elsewhere), -b dir (temp dir), -o archive mtime=max entry, \"-\" for stdout\n"
             "  Split:      -s size[kmgt], -sp pause between parts\n"
             "  Logging:    -lf file, -la append, -li info-level\n"
+            "  Dry-run:    --dry-run (log what would happen without writing)\n"
             "  Text:       -l LF->CRLF, -ll CRLF->LF\n"
             "  Entries:    -D no dir entries, -X strip extra attrs, -y store symlinks as links\n"
             "  Quiet/Verb: -q (stackable) / -v, -T test after write\n"
@@ -496,48 +523,62 @@ static int apply_cluster_flag(char c, ZContext* ctx) {
     switch (c) {
         case 'r':
             ctx->recursive = true;
+            zu_trace_option(ctx, "-r recurse into directories");
             return ZU_STATUS_OK;
         case 'j':
             ctx->store_paths = false;
+            zu_trace_option(ctx, "-j junk paths");
             return ZU_STATUS_OK;
         case 'T':
             ctx->test_integrity = true;
+            zu_trace_option(ctx, "-T test after write");
             return ZU_STATUS_OK;
         case 'q':
             ctx->quiet_level++;
             ctx->quiet = ctx->quiet_level > 0;
             ctx->verbose = false;
+            zu_trace_option(ctx, "-q quiet level %d (verbose off)", ctx->quiet_level);
             return ZU_STATUS_OK;
         case 'v':
             ctx->verbose = true;
+            zu_trace_option(ctx, "-v verbose enabled");
             return ZU_STATUS_OK;
         case 'm':
             ctx->remove_source = true;
+            zu_trace_option(ctx, "-m move sources after writing");
             return ZU_STATUS_OK;
         case 'd':
             ctx->difference_mode = true;
+            zu_trace_option(ctx, "-d delete patterns from archive");
             return ZU_STATUS_OK;
         case 'f':
             ctx->freshen = true;
+            zu_trace_option(ctx, "-f freshen existing entries");
             return ZU_STATUS_OK;
         case 'u':
             ctx->update = true;
+            zu_trace_option(ctx, "-u update newer entries");
             return ZU_STATUS_OK;
         case 'D':
             ctx->no_dir_entries = true;
+            zu_trace_option(ctx, "-D suppress directory entries");
             return ZU_STATUS_OK;
         case 'X':
             ctx->exclude_extra_attrs = true;
+            zu_trace_option(ctx, "-X drop extra attributes");
             return ZU_STATUS_OK;
         case 'y':
             ctx->store_symlinks = true;
             ctx->allow_symlinks = true;
+            zu_trace_option(ctx, "-y store symlinks as links");
             return ZU_STATUS_OK;
         case 'e':
             ctx->encrypt = true;
+            zu_trace_option(ctx, "-e enable encryption");
             return ZU_STATUS_OK;
         case 'l':
             ctx->line_mode = ZU_LINE_LF_TO_CRLF;
+            zu_trace_option(ctx, "-l translate LF->CRLF");
             return ZU_STATUS_OK;
         default:
             break;
@@ -545,6 +586,7 @@ static int apply_cluster_flag(char c, ZContext* ctx) {
 
     if (c >= '0' && c <= '9') {
         ctx->compression_level = c - '0';
+        zu_trace_option(ctx, "compression level set to %d", ctx->compression_level);
         return ZU_STATUS_OK;
     }
 
@@ -636,6 +678,7 @@ static int parse_suffix_list(ZContext* ctx, const char* first, int argc, char** 
 }
 
 static int parse_long_option(const char* tok, int argc, char** argv, int* idx, ZContext* ctx) {
+    ctx->used_long_option = true;
     const char* name = tok + 2;
     const char* value = NULL;
     char namebuf[64];
@@ -650,26 +693,38 @@ static int parse_long_option(const char* tok, int argc, char** argv, int* idx, Z
         value = eq + 1;
     }
 
+    if (strcmp(name, "dry-run") == 0) {
+        ctx->dry_run = true;
+        ctx->verbose = true;
+        ctx->quiet = false;
+        zu_trace_option(ctx, "--dry-run enable plan-only mode");
+        return ZU_STATUS_OK;
+    }
     if (strcmp(name, "recurse-paths") == 0) {
         ctx->recursive = true;
+        zu_trace_option(ctx, "--recurse-paths");
         return ZU_STATUS_OK;
     }
     if (strcmp(name, "test") == 0) {
         ctx->test_integrity = true;
+        zu_trace_option(ctx, "--test after write");
         return ZU_STATUS_OK;
     }
     if (strcmp(name, "quiet") == 0) {
         ctx->quiet_level++;
         ctx->quiet = ctx->quiet_level > 0;
         ctx->verbose = false;
+        zu_trace_option(ctx, "--quiet level %d (verbose off)", ctx->quiet_level);
         return ZU_STATUS_OK;
     }
     if (strcmp(name, "verbose") == 0) {
         ctx->verbose = true;
+        zu_trace_option(ctx, "--verbose");
         return ZU_STATUS_OK;
     }
     if (strcmp(name, "encrypt") == 0) {
         ctx->encrypt = true;
+        zu_trace_option(ctx, "--encrypt");
         return ZU_STATUS_OK;
     }
     if (strcmp(name, "password") == 0) {
@@ -684,6 +739,7 @@ static int parse_long_option(const char* tok, int argc, char** argv, int* idx, Z
         ctx->password = strdup(value);
         if (!ctx->password)
             return ZU_STATUS_OOM;
+        zu_trace_option(ctx, "--password (provided)");
         return ZU_STATUS_OK;
     }
     if (strcmp(name, "help") == 0) {
@@ -699,10 +755,12 @@ static int parse_long_option(const char* tok, int argc, char** argv, int* idx, Z
             value = argv[++(*idx)];
         }
         ctx->output_path = value;
+        zu_trace_option(ctx, "--output-file=%s", value);
         return ZU_STATUS_OK;
     }
     if (strcmp(name, "la") == 0 || strcmp(name, "log-append") == 0) {
         ctx->log_append = true;
+        zu_trace_option(ctx, "--log-append");
         return ZU_STATUS_OK;
     }
     if (strcmp(name, "lf") == 0 || strcmp(name, "logfile-path") == 0) {
@@ -719,6 +777,7 @@ static int parse_long_option(const char* tok, int argc, char** argv, int* idx, Z
     }
     if (strcmp(name, "li") == 0 || strcmp(name, "log-info") == 0) {
         ctx->log_info = true;
+        zu_trace_option(ctx, "--log-info");
         return ZU_STATUS_OK;
     }
     if (strcmp(name, "tt") == 0) {
@@ -735,42 +794,32 @@ static int parse_long_option(const char* tok, int argc, char** argv, int* idx, Z
             return ZU_STATUS_USAGE;
         }
         ctx->has_filter_before = true;
+        zu_trace_option(ctx, "--tt before %s", value);
         return ZU_STATUS_OK;
     }
     if (strcmp(name, "filesync") == 0 || strcmp(name, "FS") == 0) {
         ctx->filesync = true;
         ctx->update = true;
+        zu_trace_option(ctx, "--filesync");
         return ZU_STATUS_OK;
     }
-    if (strcmp(name, "split-size") == 0) {
-        if (!value) {
-            if (*idx + 1 >= argc) {
-                fprintf(stderr, "zip: --split-size requires an argument\n");
-                return ZU_STATUS_USAGE;
-            }
-            value = argv[++(*idx)];
-        }
-        ctx->split_size = parse_size(value);
-        if (ctx->split_size == 0) {
-            fprintf(stderr, "zip: invalid split size: %s\n", value);
-            return ZU_STATUS_USAGE;
-        }
-        return ZU_STATUS_OK;
-    }
-    if (strcmp(name, "pause") == 0 || strcmp(name, "sp") == 0) {
-        ctx->split_pause = true;
-        return ZU_STATUS_OK;
+    if (strcmp(name, "split-size") == 0 || strcmp(name, "pause") == 0 || strcmp(name, "sp") == 0) {
+        fprintf(stderr, "zip: split archives are not supported in this build\n");
+        return ZU_STATUS_NOT_IMPLEMENTED;
     }
     if (strcmp(name, "fix") == 0) {
         ctx->fix_archive = true;
+        zu_trace_option(ctx, "--fix");
         return ZU_STATUS_OK;
     }
     if (strcmp(name, "FF") == 0 || strcmp(name, "fixfix") == 0) {
         ctx->fix_fix_archive = true;
+        zu_trace_option(ctx, "--fixfix");
         return ZU_STATUS_OK;
     }
     if (strcmp(name, "ll") == 0) {
         ctx->line_mode = ZU_LINE_CRLF_TO_LF;
+        zu_trace_option(ctx, "--ll translate CRLF->LF");
         return ZU_STATUS_OK;
     }
 
@@ -792,22 +841,24 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
         }
 
         if (!endopts && tok[0] == '-' && tok[1] != '\0') {
+            zu_trace_option(ctx, "option %s", tok);
             if (strcmp(tok, "-xi") == 0 || strcmp(tok, "-ix") == 0) {
                 fprintf(stderr, "zip: use -x <patterns> ... -i <patterns> instead of %s\n", tok);
                 return ZU_STATUS_USAGE;
             }
             if (strcmp(tok, "-sp") == 0) {
-                ctx->split_pause = true;
-                ++i;
-                continue;
+                fprintf(stderr, "zip: split archives are not supported in this build\n");
+                return ZU_STATUS_NOT_IMPLEMENTED;
             }
             if (strcmp(tok, "-FF") == 0) {
                 ctx->fix_fix_archive = true;
+                zu_trace_option(ctx, "-FF fixfix");
                 ++i;
                 continue;
             }
             if (strcmp(tok, "-ll") == 0) {
                 ctx->line_mode = ZU_LINE_CRLF_TO_LF;
+                zu_trace_option(ctx, "-ll translate CRLF->LF");
                 ++i;
                 continue;
             }
@@ -817,6 +868,7 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                     return ZU_STATUS_USAGE;
                 }
                 ctx->zipnote_write = true;
+                zu_trace_option(ctx, "-w write zipnote comments");
                 ++i;
                 continue;
             }
@@ -847,6 +899,7 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                     return ZU_STATUS_USAGE;
                 }
                 ctx->has_filter_before = true;
+                zu_trace_option(ctx, "-tt before %s", arg);
                 ++i;
                 continue;
             }
@@ -862,27 +915,36 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                 ctx->log_path = strdup(arg);
                 if (!ctx->log_path)
                     return ZU_STATUS_OOM;
+                zu_trace_option(ctx, "-lf %s", arg);
                 ++i;
                 continue;
             }
             if (strcmp(tok, "-la") == 0) {
                 ctx->log_append = true;
+                zu_trace_option(ctx, "-la");
                 ++i;
                 continue;
             }
             if (strcmp(tok, "-li") == 0) {
                 ctx->log_info = true;
+                zu_trace_option(ctx, "-li");
                 ++i;
                 continue;
             }
             if (strcmp(tok, "-FS") == 0) {
                 ctx->filesync = true;
                 ctx->update = true;
+                zu_trace_option(ctx, "-FS filesync");
                 ++i;
                 continue;
             }
 
-            if (first == 'b' || first == 't' || first == 'P' || first == 'O' || first == 'Z' || first == 's') {
+            if (first == 's') {
+                fprintf(stderr, "zip: split archives are not supported in this build\n");
+                return ZU_STATUS_NOT_IMPLEMENTED;
+            }
+
+            if (first == 'b' || first == 't' || first == 'P' || first == 'O' || first == 'Z') {
                 const char* arg = rest[0] ? rest : NULL;
                 if (!arg) {
                     if (i + 1 >= argc) {
@@ -898,6 +960,7 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                         ctx->temp_dir = strdup(arg);
                         if (!ctx->temp_dir)
                             return ZU_STATUS_OOM;
+                        zu_trace_option(ctx, "-b %s", arg);
                         break;
                     case 't':
                         ctx->filter_after = parse_date(arg);
@@ -906,35 +969,34 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                             return ZU_STATUS_USAGE;
                         }
                         ctx->has_filter_after = true;
+                        zu_trace_option(ctx, "-t after %s", arg);
                         break;
                     case 'P':
                         free(ctx->password);
                         ctx->password = strdup(arg);
                         if (!ctx->password)
                             return ZU_STATUS_OOM;
+                        zu_trace_option(ctx, "-P (password provided)");
                         break;
                     case 'O':
                         ctx->output_path = arg;
+                        zu_trace_option(ctx, "-O %s", arg);
                         break;
                     case 'Z':
                         if (strcasecmp(arg, "deflate") == 0) {
                             ctx->compression_method = 8;
+                            zu_trace_option(ctx, "-Z deflate");
                         }
                         else if (strcasecmp(arg, "store") == 0) {
                             ctx->compression_method = 0;
+                            zu_trace_option(ctx, "-Z store");
                         }
                         else if (strcasecmp(arg, "bzip2") == 0) {
                             ctx->compression_method = 12;
+                            zu_trace_option(ctx, "-Z bzip2");
                         }
                         else {
                             fprintf(stderr, "zip: unknown compression method '%s'\n", arg);
-                            return ZU_STATUS_USAGE;
-                        }
-                        break;
-                    case 's':
-                        ctx->split_size = parse_size(arg);
-                        if (ctx->split_size == 0) {
-                            fprintf(stderr, "zip: invalid split size: %s\n", arg);
                             return ZU_STATUS_USAGE;
                         }
                         break;
@@ -952,6 +1014,7 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                 int rc = parse_pattern_list(ctx, argc, argv, &i, &endopts, false);
                 if (rc != ZU_STATUS_OK)
                     return rc;
+                zu_trace_option(ctx, "-x patterns");
                 ++i;
                 continue;
             }
@@ -959,6 +1022,7 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                 int rc = parse_pattern_list_with_first(ctx, rest, argc, argv, &i, &endopts, false);
                 if (rc != ZU_STATUS_OK)
                     return rc;
+                zu_trace_option(ctx, "-x patterns");
                 ++i;
                 continue;
             }
@@ -966,6 +1030,7 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                 int rc = parse_pattern_list(ctx, argc, argv, &i, &endopts, true);
                 if (rc != ZU_STATUS_OK)
                     return rc;
+                zu_trace_option(ctx, "-i patterns");
                 ++i;
                 continue;
             }
@@ -973,6 +1038,7 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                 int rc = parse_pattern_list_with_first(ctx, rest, argc, argv, &i, &endopts, true);
                 if (rc != ZU_STATUS_OK)
                     return rc;
+                zu_trace_option(ctx, "-i patterns");
                 ++i;
                 continue;
             }
@@ -980,6 +1046,7 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                 int rc = parse_suffix_list(ctx, NULL, argc, argv, &i, &endopts);
                 if (rc != ZU_STATUS_OK)
                     return rc;
+                zu_trace_option(ctx, "-n suffix list");
                 ++i;
                 continue;
             }
@@ -987,6 +1054,7 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                 int rc = parse_suffix_list(ctx, rest, argc, argv, &i, &endopts);
                 if (rc != ZU_STATUS_OK)
                     return rc;
+                zu_trace_option(ctx, "-n suffix list");
                 ++i;
                 continue;
             }
@@ -995,16 +1063,19 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                 if (rc != ZU_STATUS_OK) {
                     return rc;
                 }
+                zu_trace_option(ctx, "-@ names from stdin");
                 ++i;
                 continue;
             }
             if (strcmp(tok, "-F") == 0) {
                 ctx->fix_archive = true;
+                zu_trace_option(ctx, "-F fix");
                 ++i;
                 continue;
             }
             if (strcmp(tok, "-z") == 0) {
                 ctx->zip_comment_specified = true;
+                zu_trace_option(ctx, "-z zipfile comment from stdin");
                 ++i;
                 continue;
             }
@@ -1014,6 +1085,7 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
             }
             if (strcmp(tok, "-o") == 0) {
                 ctx->set_archive_mtime = true;
+                zu_trace_option(ctx, "-o set archive mtime");
                 ++i;
                 continue;
             }
@@ -1049,12 +1121,14 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
             if (strcmp(ctx->archive_path, "-") == 0) {
                 ctx->output_to_stdout = true;
             }
+            zu_trace_option(ctx, "archive path set to %s", ctx->archive_path);
             ++i;
             continue;
         }
 
         if (zu_strlist_push(&ctx->include, tok) != 0)
             return ZU_STATUS_OOM;
+        zu_trace_option(ctx, "include path %s", tok);
         ++i;
     }
 
@@ -1089,20 +1163,22 @@ int main(int argc, char** argv) {
     // Default behavior for 'zip' is to modify/update existing archives
     ctx->modify_archive = true;
 
-    if (is_alias(argv[0], "zipcloak")) {
+    bool invoked_as_zipcloak = is_alias(argv[0], "zipcloak");
+    if (invoked_as_zipcloak) {
         ctx->encrypt = true;
         ctx->modify_archive = true;
         // zipcloak implies no recursion/store flags, usually just modifying
     }
     else if (is_alias(argv[0], "zipsplit")) {
-        fprintf(stderr, "%s: functionality not yet implemented\n", argv[0]);
+        fprintf(stderr, "%s: split archives are not supported in this build\n", argv[0]);
         zu_context_free(ctx);
-        return 1;
+        return map_exit_code(ZU_STATUS_NOT_IMPLEMENTED);
     }
     bool is_zipnote = is_alias(argv[0], "zipnote");
     if (is_zipnote) {
         ctx->zipnote_mode = true;
     }
+    const char* tool_name = invoked_as_zipcloak ? "zipcloak" : (is_zipnote ? "zipnote" : "zip");
 
     int parse_rc = parse_zip_args(argc, argv, ctx, is_zipnote);
     if (parse_rc == ZU_STATUS_USAGE) {
@@ -1114,6 +1190,15 @@ int main(int argc, char** argv) {
         zu_context_free(ctx);
         return map_exit_code(parse_rc);
     }
+
+    if (ctx->dry_run) {
+        ctx->quiet = false;
+        ctx->verbose = true;
+    }
+
+    emit_zip_stub_warnings(ctx, invoked_as_zipcloak);
+    trace_effective_zip_defaults(ctx);
+    emit_option_trace(tool_name, ctx);
 
     if (is_zipnote && ctx->zip_comment_specified) {
         fprintf(stderr, "zipnote: -z is not supported with zipnote (use zip -z instead)\n");

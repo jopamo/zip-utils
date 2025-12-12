@@ -195,10 +195,6 @@ main() {
     "printf 'comment\n' | $SYSZIP -z $OUT/z_comment.sys.zip lf.txt" \
     "printf 'comment\n' | $MYZIP -z $OUT/z_comment.my.zip lf.txt" || fails=$((fails+1))
 
-  run_case split_64k \
-    "$SYSZIP -s 64k $OUT/split_64k.sys.zip blob.bin" \
-    "$MYZIP -s 64k $OUT/split_64k.my.zip blob.bin" || fails=$((fails+1))
-
   run_case no_dirs \
     "$SYSZIP -D -r $OUT/no_dirs.sys.zip d" \
     "$MYZIP -D -r $OUT/no_dirs.my.zip d" || fails=$((fails+1))

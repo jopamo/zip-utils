@@ -1,6 +1,8 @@
 #include "ctx.h"
 #include "fileio.h"
 
+#include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -55,6 +57,8 @@ ZContext* zu_context_create(void) {
     zu_strlist_init(&ctx->exclude);
     zu_strlist_init(&ctx->existing_entries);
     zu_strlist_init(&ctx->no_compress_suffixes);
+    zu_strlist_init(&ctx->warnings);
+    zu_strlist_init(&ctx->option_events);
 
     return ctx;
 }
@@ -85,10 +89,11 @@ void zu_context_free(ZContext* ctx) {
     zu_strlist_free(&ctx->include_patterns);
     zu_strlist_free(&ctx->exclude);
     zu_strlist_free(&ctx->no_compress_suffixes);
+    zu_strlist_free(&ctx->warnings);
+    zu_strlist_free(&ctx->option_events);
     zu_strlist_free_with_dtor(&ctx->existing_entries, zu_existing_entry_free);
     free(ctx->io_buffer);
     free(ctx->zip_comment);
-    free(ctx->temp_read_path);
     free(ctx->temp_dir);
     free(ctx->password);
     free(ctx);
@@ -106,4 +111,41 @@ void zu_context_set_error(ZContext* ctx, int status, const char* msg) {
     else {
         ctx->error_msg[0] = '\0';
     }
+}
+
+void zu_warn_once(ZContext* ctx, const char* msg) {
+    if (!ctx || !msg) {
+        return;
+    }
+
+    for (size_t i = 0; i < ctx->warnings.len; ++i) {
+        if (strcmp(ctx->warnings.items[i], msg) == 0) {
+            return;
+        }
+    }
+
+    if (zu_strlist_push(&ctx->warnings, msg) != 0) {
+        return;
+    }
+
+    fprintf(stderr, "%s\n", msg);
+    if (ctx->log_file) {
+        fprintf(ctx->log_file, "%s\n", msg);
+        fflush(ctx->log_file);
+    }
+}
+
+void zu_trace_option(ZContext* ctx, const char* fmt, ...) {
+    if (!ctx || !fmt) {
+        return;
+    }
+
+    char buf[256];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+
+    /* Best effort: if allocation fails, skip the trace entry */
+    zu_strlist_push(&ctx->option_events, buf);
 }

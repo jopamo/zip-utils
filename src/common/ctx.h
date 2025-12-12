@@ -41,8 +41,6 @@ struct ZContext {
     uint64_t current_offset;
     uint8_t* io_buffer;
     size_t io_buffer_size;
-    char* temp_read_path;    /* Concatenated split archive path */
-    bool temp_read_is_split; /* Whether temp_read_path should be unlinked */
 
     /* Configuration */
     int compression_level;  /* 0-9 */
@@ -54,6 +52,7 @@ struct ZContext {
     bool quiet;
     int quiet_level;
     bool verbose;
+    bool dry_run;
     bool zipnote_mode;
     bool zipnote_write;
     bool existing_loaded;
@@ -99,12 +98,16 @@ struct ZContext {
     bool sort_entries;            // Whether to sort entries in the central directory
 
     /* Output/Logging */
-    char* temp_dir;          /* -b */
-    const char* output_path; /* -O */
-    char* log_path;          /* -lf */
-    bool log_append;         /* -la */
-    bool log_info;           /* -li */
-    FILE* log_file;          /* Handle for log file */
+    char* temp_dir;           /* -b */
+    const char* output_path;  /* -O */
+    char* log_path;           /* -lf */
+    bool log_append;          /* -la */
+    bool log_info;            /* -li */
+    FILE* log_file;           /* Handle for log file */
+    ZU_StrList warnings;      /* Deduplicated warnings emitted during a run */
+    ZU_StrList option_events; /* Ordered option trace for diagnostics */
+    bool used_long_option;    /* Track whether a long option was parsed */
+    bool zipinfo_stub_used;   /* Track stubbed zipinfo flags for warnings */
 
     /* Filtering */
     time_t filter_after; /* -t */
@@ -122,13 +125,6 @@ struct ZContext {
     bool encrypt;
     char* password;
 
-    /* Split Archives */
-    uint64_t split_size; /* 0 = disabled */
-    bool split_pause;
-    uint32_t split_disk_index;
-    uint64_t split_written;
-    char* temp_write_path;
-
     /* Archive Fixing */
     bool fix_archive;     /* -F */
     bool fix_fix_archive; /* -FF */
@@ -142,5 +138,7 @@ ZContext* zu_context_create(void);
 void zu_context_free(ZContext* ctx);
 void zu_context_set_error(ZContext* ctx, int status, const char* msg);
 void zu_log(ZContext* ctx, const char* fmt, ...);
+void zu_warn_once(ZContext* ctx, const char* msg);
+void zu_trace_option(ZContext* ctx, const char* fmt, ...);
 
 #endif
