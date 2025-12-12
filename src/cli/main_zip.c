@@ -1,6 +1,5 @@
 #define _GNU_SOURCE
 
-#include <getopt.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -445,6 +444,9 @@ static void print_usage(FILE* to, const char* argv0) {
             "Modern rewrite stub: captures options into a reentrant context but\n"
             "does not yet perform archiving.\n"
             "\n"
+            "If archive and inputs are omitted, zip reads stdin and writes the\n"
+            "archive to stdout (\"filter\" mode).\n"
+            "\n"
             "Common options:\n"
             "  -r, --recurse-paths   Recurse into directories\n"
             "  -j                    Junk directory paths\n"
@@ -463,246 +465,533 @@ static void print_usage(FILE* to, const char* argv0) {
             argv0);
 }
 
-static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote) {
-    static const struct option long_opts[] = {
-        {"recurse-paths", no_argument, NULL, 'r'},
-        {"test", no_argument, NULL, 'T'},
-        {"quiet", no_argument, NULL, 'q'},
-        {"verbose", no_argument, NULL, 'v'},
-        {"encrypt", no_argument, NULL, 'e'},
-        {"password", required_argument, NULL, 'P'},
-        {"help", no_argument, NULL, 'h'},
-        {"output-file", required_argument, NULL, 'O'},
-        {"la", no_argument, NULL, 1001},
-        {"log-append", no_argument, NULL, 1001},
-        {"lf", required_argument, NULL, 1002},
-        {"logfile-path", required_argument, NULL, 1002},
-        {"li", no_argument, NULL, 1003},
-        {"log-info", no_argument, NULL, 1003},
-        {"tt", required_argument, NULL, 1004},
-        {"filesync", no_argument, NULL, 1005},
-        {"FS", no_argument, NULL, 1005},
-        {"split-size", required_argument, NULL, 's'},
-        {"pause", no_argument, NULL, 1006},
-        {"sp", no_argument, NULL, 1006},
-        {"fix", no_argument, NULL, 'F'},
-        {"FF", no_argument, NULL, 1007},
-        {"fixfix", no_argument, NULL, 1007},
-        {"ll", no_argument, NULL, 1008},
-        {NULL, 0, NULL, 0},
-    };
+static bool is_cluster_flag(char c) {
+    switch (c) {
+        case 'r':
+        case 'j':
+        case 'T':
+        case 'q':
+        case 'v':
+        case 'm':
+        case 'd':
+        case 'f':
+        case 'u':
+        case 'D':
+        case 'X':
+        case 'y':
+        case 'e':
+        case 'l':
+            return true;
+        default:
+            break;
+    }
+    return (c >= '0' && c <= '9');
+}
 
-    int opt;
-    // Added O, t to short opts
-    while ((opt = getopt_long_only(argc, argv, "rjTqvmdfui:x:0123456789heP:O:t:Z:s:Fzw@cob:n:DAJXyl", long_opts, NULL)) != -1) {
-        switch (opt) {
-            case 'r':
-                ctx->recursive = true;
-                break;
-            case 'j':
-                ctx->store_paths = false;
-                break;
-            case 'm':
-                ctx->remove_source = true;
-                break;
-            case 'd':
-                ctx->difference_mode = true;
-                break;
-            case 'f':
-                ctx->freshen = true;
-                break;
-            case 'u':
-                ctx->update = true;
-                break;
-            case 1005:  // -FS
-                ctx->filesync = true;
-                ctx->update = true;
-                break;
-            case 's':
-                ctx->split_size = parse_size(optarg);
-                if (ctx->split_size == 0) {
-                    fprintf(stderr, "zip: invalid split size: %s\n", optarg);
-                    return ZU_STATUS_USAGE;
-                }
-                break;
-            case 1006:  // -sp (pause) -- usually passed as -sp, but getopt_long_only might match -s if not careful.
-                        // Actually, standard zip uses -s <size> and -sp for pause.
-                        // Since we use getopt_long_only, "-sp" might be interpreted as short 's' with arg "p" if we aren't careful?
-                        // No, getopt_long_only checks long options first.
-                        // But "sp" isn't in long_opts? Wait. "pause" is 1006.
-                        // The user said "-s" and "-sp".
-                        // If I want to support "-sp" specifically, I should probably add it as a long option or handle it differently.
-                        // However, since we are using getopt_long_only, we can just add "sp" to long_opts or handle it manually?
-                        // Standard zip options are a mix.
-                        // Let's assume user uses `--pause` or we need to hack it.
-                        // Wait, standard `zip` treats `-sp` as a flag. But `zip -s 10m` takes an arg.
-                        // If I put "sp" in long_opts, it will work with single dash too in long_only mode.
+static int apply_cluster_flag(char c, ZContext* ctx) {
+    switch (c) {
+        case 'r':
+            ctx->recursive = true;
+            return ZU_STATUS_OK;
+        case 'j':
+            ctx->store_paths = false;
+            return ZU_STATUS_OK;
+        case 'T':
+            ctx->test_integrity = true;
+            return ZU_STATUS_OK;
+        case 'q':
+            ctx->quiet_level++;
+            ctx->quiet = ctx->quiet_level > 0;
+            ctx->verbose = false;
+            return ZU_STATUS_OK;
+        case 'v':
+            ctx->verbose = true;
+            return ZU_STATUS_OK;
+        case 'm':
+            ctx->remove_source = true;
+            return ZU_STATUS_OK;
+        case 'd':
+            ctx->difference_mode = true;
+            return ZU_STATUS_OK;
+        case 'f':
+            ctx->freshen = true;
+            return ZU_STATUS_OK;
+        case 'u':
+            ctx->update = true;
+            return ZU_STATUS_OK;
+        case 'D':
+            fprintf(stderr, "zip: -D (do not add directory entries) not supported in this version\n");
+            return ZU_STATUS_NOT_IMPLEMENTED;
+        case 'X':
+            fprintf(stderr, "zip: -X (exclude extra file attributes) not supported in this version\n");
+            return ZU_STATUS_NOT_IMPLEMENTED;
+        case 'y':
+            fprintf(stderr, "zip: -y (store symbolic links as the link) not supported in this version\n");
+            return ZU_STATUS_NOT_IMPLEMENTED;
+        case 'e':
+            ctx->encrypt = true;
+            return ZU_STATUS_OK;
+        case 'l':
+            fprintf(stderr, "zip: -l (convert LF to CR LF) not supported in this version\n");
+            return ZU_STATUS_NOT_IMPLEMENTED;
+        default:
+            break;
+    }
+
+    if (c >= '0' && c <= '9') {
+        ctx->compression_level = c - '0';
+        return ZU_STATUS_OK;
+    }
+
+    return ZU_STATUS_USAGE;
+}
+
+static int parse_pattern_list(ZContext* ctx, int argc, char** argv, int* idx, bool* endopts, bool include) {
+    int i = *idx + 1;
+    bool any = false;
+
+    for (; i < argc; ++i) {
+        const char* tok = argv[i];
+        if (!*endopts && strcmp(tok, "--") == 0) {
+            *endopts = true;
+            ++i;
+            break;
+        }
+        if (!*endopts && tok[0] == '-' && tok[1] != '\0') {
+            break;
+        }
+        if (include) {
+            if (zu_strlist_push(&ctx->include_patterns, tok) != 0)
+                return ZU_STATUS_OOM;
+        }
+        else {
+            if (zu_strlist_push(&ctx->exclude, tok) != 0)
+                return ZU_STATUS_OOM;
+        }
+        any = true;
+    }
+
+    if (!any) {
+        fprintf(stderr, "zip: option requires one or more patterns\n");
+        return ZU_STATUS_USAGE;
+    }
+
+    *idx = i - 1;
+    return ZU_STATUS_OK;
+}
+
+static int parse_long_option(const char* tok, int argc, char** argv, int* idx, ZContext* ctx) {
+    const char* name = tok + 2;
+    const char* value = NULL;
+    char namebuf[64];
+    const char* eq = strchr(name, '=');
+    if (eq) {
+        size_t len = (size_t)(eq - name);
+        if (len >= sizeof(namebuf))
+            len = sizeof(namebuf) - 1;
+        memcpy(namebuf, name, len);
+        namebuf[len] = '\0';
+        name = namebuf;
+        value = eq + 1;
+    }
+
+    if (strcmp(name, "recurse-paths") == 0) {
+        ctx->recursive = true;
+        return ZU_STATUS_OK;
+    }
+    if (strcmp(name, "test") == 0) {
+        ctx->test_integrity = true;
+        return ZU_STATUS_OK;
+    }
+    if (strcmp(name, "quiet") == 0) {
+        ctx->quiet_level++;
+        ctx->quiet = ctx->quiet_level > 0;
+        ctx->verbose = false;
+        return ZU_STATUS_OK;
+    }
+    if (strcmp(name, "verbose") == 0) {
+        ctx->verbose = true;
+        return ZU_STATUS_OK;
+    }
+    if (strcmp(name, "encrypt") == 0) {
+        ctx->encrypt = true;
+        return ZU_STATUS_OK;
+    }
+    if (strcmp(name, "password") == 0) {
+        if (!value) {
+            if (*idx + 1 >= argc) {
+                fprintf(stderr, "zip: --password requires an argument\n");
+                return ZU_STATUS_USAGE;
+            }
+            value = argv[++(*idx)];
+        }
+        free(ctx->password);
+        ctx->password = strdup(value);
+        if (!ctx->password)
+            return ZU_STATUS_OOM;
+        return ZU_STATUS_OK;
+    }
+    if (strcmp(name, "help") == 0) {
+        print_usage(stdout, argv[0]);
+        return ZU_STATUS_USAGE;
+    }
+    if (strcmp(name, "output-file") == 0) {
+        if (!value) {
+            if (*idx + 1 >= argc) {
+                fprintf(stderr, "zip: --output-file requires an argument\n");
+                return ZU_STATUS_USAGE;
+            }
+            value = argv[++(*idx)];
+        }
+        ctx->output_path = value;
+        return ZU_STATUS_OK;
+    }
+    if (strcmp(name, "la") == 0 || strcmp(name, "log-append") == 0) {
+        ctx->log_append = true;
+        return ZU_STATUS_OK;
+    }
+    if (strcmp(name, "lf") == 0 || strcmp(name, "logfile-path") == 0) {
+        if (!value) {
+            if (*idx + 1 >= argc) {
+                fprintf(stderr, "zip: --logfile-path requires an argument\n");
+                return ZU_STATUS_USAGE;
+            }
+            value = argv[++(*idx)];
+        }
+        free(ctx->log_path);
+        ctx->log_path = strdup(value);
+        return ctx->log_path ? ZU_STATUS_OK : ZU_STATUS_OOM;
+    }
+    if (strcmp(name, "li") == 0 || strcmp(name, "log-info") == 0) {
+        ctx->log_info = true;
+        return ZU_STATUS_OK;
+    }
+    if (strcmp(name, "tt") == 0) {
+        if (!value) {
+            if (*idx + 1 >= argc) {
+                fprintf(stderr, "zip: -tt requires a date\n");
+                return ZU_STATUS_USAGE;
+            }
+            value = argv[++(*idx)];
+        }
+        ctx->filter_before = parse_date(value);
+        if (ctx->filter_before == (time_t)-1) {
+            fprintf(stderr, "zip: invalid date format for -tt: %s\n", value);
+            return ZU_STATUS_USAGE;
+        }
+        ctx->has_filter_before = true;
+        return ZU_STATUS_OK;
+    }
+    if (strcmp(name, "filesync") == 0 || strcmp(name, "FS") == 0) {
+        ctx->filesync = true;
+        ctx->update = true;
+        return ZU_STATUS_OK;
+    }
+    if (strcmp(name, "split-size") == 0) {
+        if (!value) {
+            if (*idx + 1 >= argc) {
+                fprintf(stderr, "zip: --split-size requires an argument\n");
+                return ZU_STATUS_USAGE;
+            }
+            value = argv[++(*idx)];
+        }
+        ctx->split_size = parse_size(value);
+        if (ctx->split_size == 0) {
+            fprintf(stderr, "zip: invalid split size: %s\n", value);
+            return ZU_STATUS_USAGE;
+        }
+        return ZU_STATUS_OK;
+    }
+    if (strcmp(name, "pause") == 0 || strcmp(name, "sp") == 0) {
+        ctx->split_pause = true;
+        return ZU_STATUS_OK;
+    }
+    if (strcmp(name, "fix") == 0) {
+        ctx->fix_archive = true;
+        return ZU_STATUS_OK;
+    }
+    if (strcmp(name, "FF") == 0 || strcmp(name, "fixfix") == 0) {
+        ctx->fix_fix_archive = true;
+        return ZU_STATUS_OK;
+    }
+    if (strcmp(name, "ll") == 0) {
+        fprintf(stderr, "zip: -ll (convert CR LF to LF) not supported in this version\n");
+        return ZU_STATUS_NOT_IMPLEMENTED;
+    }
+
+    print_usage(stderr, argv[0]);
+    return ZU_STATUS_USAGE;
+}
+
+static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote) {
+    bool endopts = false;
+    int i = 1;
+
+    while (i < argc) {
+        const char* tok = argv[i];
+
+        if (!endopts && strcmp(tok, "--") == 0) {
+            endopts = true;
+            ++i;
+            continue;
+        }
+
+        if (!endopts && tok[0] == '-' && tok[1] != '\0') {
+            if (strcmp(tok, "-xi") == 0 || strcmp(tok, "-ix") == 0) {
+                fprintf(stderr, "zip: use -x <patterns> ... -i <patterns> instead of %s\n", tok);
+                return ZU_STATUS_USAGE;
+            }
+            if (strcmp(tok, "-sp") == 0) {
                 ctx->split_pause = true;
-                break;
-            case 'F':
-                ctx->fix_archive = true;
-                break;
-            case 1007:  // -FF
+                ++i;
+                continue;
+            }
+            if (strcmp(tok, "-FF") == 0) {
                 ctx->fix_fix_archive = true;
-                break;
-            case 1008:  // -ll
+                ++i;
+                continue;
+            }
+            if (strcmp(tok, "-ll") == 0) {
                 fprintf(stderr, "zip: -ll (convert CR LF to LF) not supported in this version\n");
                 return ZU_STATUS_NOT_IMPLEMENTED;
-            case 'T':
-                ctx->test_integrity = true;
-                break;
-            case 'q':
-                ctx->quiet_level++;
-                ctx->quiet = ctx->quiet_level > 0;
-                ctx->verbose = false;
-                break;
-            case 'v':
-                ctx->verbose = true;
-                break;
-            case 'e':
-                ctx->encrypt = true;
-                break;
-            case 'P':
-                free(ctx->password);
-                ctx->password = strdup(optarg);
-                if (!ctx->password)
-                    return ZU_STATUS_OOM;
-                break;
-            case 'O':
-                ctx->output_path = optarg;
-                break;
-            case 't':  // -t mmddyyyy (after)
-                ctx->filter_after = parse_date(optarg);
-                if (ctx->filter_after == (time_t)-1) {
-                    fprintf(stderr, "zip: invalid date format for -t: %s\n", optarg);
-                    return ZU_STATUS_USAGE;
-                }
-                ctx->has_filter_after = true;
-                break;
-            case 1004:  // -tt mmddyyyy (before)
-                ctx->filter_before = parse_date(optarg);
-                if (ctx->filter_before == (time_t)-1) {
-                    fprintf(stderr, "zip: invalid date format for -tt: %s\n", optarg);
-                    return ZU_STATUS_USAGE;
-                }
-                ctx->has_filter_before = true;
-                break;
-            case 1001:  // -la
-                ctx->log_append = true;
-                break;
-            case 1002:  // -lf
-                free(ctx->log_path);
-                ctx->log_path = strdup(optarg);
-                if (!ctx->log_path)
-                    return ZU_STATUS_OOM;
-                break;
-            case 1003:  // -li
-                ctx->log_info = true;
-                break;
-            case 'i':
-                if (zu_strlist_push(&ctx->include_patterns, optarg) != 0)
-                    return ZU_STATUS_OOM;
-                break;
-            case 'x':
-                if (zu_strlist_push(&ctx->exclude, optarg) != 0)
-                    return ZU_STATUS_OOM;
-                break;
-            case '0':
-            case '1':
-            case '2':
-            case '3':
-            case '4':
-            case '5':
-            case '6':
-            case '7':
-            case '8':
-            case '9':
-                ctx->compression_level = opt - '0';
-                break;
-            case 'Z':
-                if (strcasecmp(optarg, "deflate") == 0) {
-                    ctx->compression_method = 8;
-                }
-                else if (strcasecmp(optarg, "store") == 0) {
-                    ctx->compression_method = 0;
-                }
-                else if (strcasecmp(optarg, "bzip2") == 0) {
-                    ctx->compression_method = 12;
-                }
-                else {
-                    fprintf(stderr, "zip: unknown compression method '%s'\n", optarg);
-                    return ZU_STATUS_USAGE;
-                }
-                break;
-            case 'z':
-                ctx->zip_comment_specified = true;
-                break;
-            case '@': {
-                int rc = read_stdin_names(ctx);
-                if (rc != ZU_STATUS_OK) {
-                    return rc;
-                }
-            } break;
-            case 'c':
-                fprintf(stderr, "zip: -c (add one-line comments) not supported in this version\n");
-                return ZU_STATUS_NOT_IMPLEMENTED;
-            case 'o':
-                fprintf(stderr, "zip: -o (make zipfile as old as latest entry) not supported in this version\n");
-                return ZU_STATUS_NOT_IMPLEMENTED;
-            case 'b':
-                fprintf(stderr, "zip: -b (temp file path) not supported in this version\n");
-                return ZU_STATUS_NOT_IMPLEMENTED;
-            case 'n':
-                fprintf(stderr, "zip: -n (don't compress suffixes) not supported in this version\n");
-                return ZU_STATUS_NOT_IMPLEMENTED;
-            case 'D':
-                fprintf(stderr, "zip: -D (do not add directory entries) not supported in this version\n");
-                return ZU_STATUS_NOT_IMPLEMENTED;
-            case 'A':
-                fprintf(stderr, "zip: -A (adjust self-extracting exe) not supported in this version\n");
-                return ZU_STATUS_NOT_IMPLEMENTED;
-            case 'J':
-                fprintf(stderr, "zip: -J (junk zipfile prefix) not supported in this version\n");
-                return ZU_STATUS_NOT_IMPLEMENTED;
-            case 'X':
-                fprintf(stderr, "zip: -X (exclude extra file attributes) not supported in this version\n");
-                return ZU_STATUS_NOT_IMPLEMENTED;
-            case 'y':
-                fprintf(stderr, "zip: -y (store symbolic links as the link) not supported in this version\n");
-                return ZU_STATUS_NOT_IMPLEMENTED;
-            case 'l':
-                fprintf(stderr, "zip: -l (convert LF to CR LF) not supported in this version\n");
-                return ZU_STATUS_NOT_IMPLEMENTED;
-            case 'w':
+            }
+            if (strcmp(tok, "-w") == 0) {
                 if (!is_zipnote) {
                     print_usage(stderr, argv[0]);
                     return ZU_STATUS_USAGE;
                 }
                 ctx->zipnote_write = true;
-                break;
-            case 'h':
-                print_usage(stdout, argv[0]);
+                ++i;
+                continue;
+            }
+            if (tok[1] == '-') {
+                int rc = parse_long_option(tok, argc, argv, &i, ctx);
+                if (rc != ZU_STATUS_OK) {
+                    return rc;
+                }
+                ++i;
+                continue;
+            }
+
+            char first = tok[1];
+            const char* rest = tok + 2;
+
+            if (strncmp(tok, "-tt", 3) == 0) {
+                const char* arg = tok[3] ? tok + 3 : NULL;
+                if (!arg) {
+                    if (i + 1 >= argc) {
+                        fprintf(stderr, "zip: -tt requires a date\n");
+                        return ZU_STATUS_USAGE;
+                    }
+                    arg = argv[++i];
+                }
+                ctx->filter_before = parse_date(arg);
+                if (ctx->filter_before == (time_t)-1) {
+                    fprintf(stderr, "zip: invalid date format for -tt: %s\n", arg);
+                    return ZU_STATUS_USAGE;
+                }
+                ctx->has_filter_before = true;
+                ++i;
+                continue;
+            }
+
+            if (strcmp(tok, "-lf") == 0) {
+                const char* arg = NULL;
+                if (i + 1 >= argc) {
+                    fprintf(stderr, "zip: -lf requires a path\n");
+                    return ZU_STATUS_USAGE;
+                }
+                arg = argv[++i];
+                free(ctx->log_path);
+                ctx->log_path = strdup(arg);
+                if (!ctx->log_path)
+                    return ZU_STATUS_OOM;
+                ++i;
+                continue;
+            }
+            if (strcmp(tok, "-la") == 0) {
+                ctx->log_append = true;
+                ++i;
+                continue;
+            }
+            if (strcmp(tok, "-li") == 0) {
+                ctx->log_info = true;
+                ++i;
+                continue;
+            }
+            if (strcmp(tok, "-FS") == 0) {
+                ctx->filesync = true;
+                ctx->update = true;
+                ++i;
+                continue;
+            }
+
+            if (first == 'b' || first == 't' || first == 'P' || first == 'O' || first == 'Z' || first == 's') {
+                const char* arg = rest[0] ? rest : NULL;
+                if (!arg) {
+                    if (i + 1 >= argc) {
+                        print_usage(stderr, argv[0]);
+                        return ZU_STATUS_USAGE;
+                    }
+                    arg = argv[++i];
+                }
+
+                switch (first) {
+                    case 'b':
+                        fprintf(stderr, "zip: -b (temp file path) not supported in this version\n");
+                        return ZU_STATUS_NOT_IMPLEMENTED;
+                    case 't':
+                        ctx->filter_after = parse_date(arg);
+                        if (ctx->filter_after == (time_t)-1) {
+                            fprintf(stderr, "zip: invalid date format for -t: %s\n", arg);
+                            return ZU_STATUS_USAGE;
+                        }
+                        ctx->has_filter_after = true;
+                        break;
+                    case 'P':
+                        free(ctx->password);
+                        ctx->password = strdup(arg);
+                        if (!ctx->password)
+                            return ZU_STATUS_OOM;
+                        break;
+                    case 'O':
+                        ctx->output_path = arg;
+                        break;
+                    case 'Z':
+                        if (strcasecmp(arg, "deflate") == 0) {
+                            ctx->compression_method = 8;
+                        }
+                        else if (strcasecmp(arg, "store") == 0) {
+                            ctx->compression_method = 0;
+                        }
+                        else if (strcasecmp(arg, "bzip2") == 0) {
+                            ctx->compression_method = 12;
+                        }
+                        else {
+                            fprintf(stderr, "zip: unknown compression method '%s'\n", arg);
+                            return ZU_STATUS_USAGE;
+                        }
+                        break;
+                    case 's':
+                        ctx->split_size = parse_size(arg);
+                        if (ctx->split_size == 0) {
+                            fprintf(stderr, "zip: invalid split size: %s\n", arg);
+                            return ZU_STATUS_USAGE;
+                        }
+                        break;
+                }
+                ++i;
+                continue;
+            }
+
+            if ((first == 'x' || first == 'i' || first == 'n' || first == '@' || first == 'F' || first == 'z' || first == 'c' || first == 'o' || first == 'A' || first == 'J') && rest[0] != '\0') {
+                fprintf(stderr, "zip: option '%c' must be separate (not clustered)\n", first);
                 return ZU_STATUS_USAGE;
-            case '?':
-            default:
+            }
+
+            if (strcmp(tok, "-x") == 0) {
+                int rc = parse_pattern_list(ctx, argc, argv, &i, &endopts, false);
+                if (rc != ZU_STATUS_OK)
+                    return rc;
+                ++i;
+                continue;
+            }
+            if (strcmp(tok, "-i") == 0) {
+                int rc = parse_pattern_list(ctx, argc, argv, &i, &endopts, true);
+                if (rc != ZU_STATUS_OK)
+                    return rc;
+                ++i;
+                continue;
+            }
+            if (strcmp(tok, "-n") == 0) {
+                fprintf(stderr, "zip: -n (don't compress suffixes) not supported in this version\n");
+                return ZU_STATUS_NOT_IMPLEMENTED;
+            }
+            if (strcmp(tok, "-@") == 0) {
+                int rc = read_stdin_names(ctx);
+                if (rc != ZU_STATUS_OK) {
+                    return rc;
+                }
+                ++i;
+                continue;
+            }
+            if (strcmp(tok, "-F") == 0) {
+                ctx->fix_archive = true;
+                ++i;
+                continue;
+            }
+            if (strcmp(tok, "-z") == 0) {
+                ctx->zip_comment_specified = true;
+                ++i;
+                continue;
+            }
+            if (strcmp(tok, "-c") == 0) {
+                fprintf(stderr, "zip: -c (add one-line comments) not supported in this version\n");
+                return ZU_STATUS_NOT_IMPLEMENTED;
+            }
+            if (strcmp(tok, "-o") == 0) {
+                fprintf(stderr, "zip: -o (make zipfile as old as latest entry) not supported in this version\n");
+                return ZU_STATUS_NOT_IMPLEMENTED;
+            }
+            if (strcmp(tok, "-A") == 0) {
+                fprintf(stderr, "zip: -A (adjust self-extracting exe) not supported in this version\n");
+                return ZU_STATUS_NOT_IMPLEMENTED;
+            }
+            if (strcmp(tok, "-J") == 0) {
+                fprintf(stderr, "zip: -J (junk zipfile prefix) not supported in this version\n");
+                return ZU_STATUS_NOT_IMPLEMENTED;
+            }
+
+            bool handled_cluster = true;
+            for (const char* p = tok + 1; *p; ++p) {
+                if (!is_cluster_flag(*p)) {
+                    handled_cluster = false;
+                    break;
+                }
+                int rc = apply_cluster_flag(*p, ctx);
+                if (rc != ZU_STATUS_OK)
+                    return rc;
+            }
+            if (!handled_cluster) {
                 print_usage(stderr, argv[0]);
                 return ZU_STATUS_USAGE;
+            }
+            ++i;
+            continue;
         }
+
+        if (!ctx->archive_path) {
+            ctx->archive_path = tok;
+            if (strcmp(ctx->archive_path, "-") == 0) {
+                ctx->output_to_stdout = true;
+            }
+            ++i;
+            break;
+        }
+
+        break;
     }
 
-    if (optind >= argc) {
-        print_usage(stderr, argv[0]);
-        return ZU_STATUS_USAGE;
-    }
-
-    ctx->archive_path = argv[optind++];
-    if (strcmp(ctx->archive_path, "-") == 0) {
-        ctx->output_to_stdout = true;
-    }
-
-    for (int i = optind; i < argc; ++i) {
+    for (; i < argc; ++i) {
+        if (!endopts && strcmp(argv[i], "--") == 0) {
+            endopts = true;
+            continue;
+        }
         if (zu_strlist_push(&ctx->include, argv[i]) != 0)
             return ZU_STATUS_OOM;
+    }
+
+    if (!ctx->archive_path) {
+        if (ctx->include.len == 0) {
+            ctx->archive_path = "-";
+            ctx->output_to_stdout = true;
+            if (zu_strlist_push(&ctx->include, "-") != 0)
+                return ZU_STATUS_OOM;
+        }
+        else {
+            print_usage(stderr, argv[0]);
+            return ZU_STATUS_USAGE;
+        }
     }
 
     return ZU_STATUS_OK;

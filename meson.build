@@ -223,6 +223,14 @@ test('integration-move', python3,
   timeout: 30
 )
 
+test('integration-option-parsing', python3,
+  args: [meson.project_source_root() / 'tests/test_option_parsing.py'],
+  env: {
+    'WRITE_BIN': zip_exe.full_path()
+  },
+  timeout: 30
+)
+
 test('integration-comments', python3,
   args: [meson.project_source_root() / 'tests/test_comments.py'],
   env: {
