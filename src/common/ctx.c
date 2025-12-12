@@ -15,6 +15,7 @@ ZContext* zu_context_create(void) {
     ctx->compression_level = 6;
     ctx->compression_method = 8;
     ctx->store_paths = true;
+    ctx->recurse_from_cwd = false;
     ctx->match_case = true;
     ctx->last_error = ZU_STATUS_OK;
     ctx->io_buffer_size = 0;
@@ -22,6 +23,7 @@ ZContext* zu_context_create(void) {
     ctx->quiet_level = 0;
     ctx->zipnote_mode = false;
     ctx->zipnote_write = false;
+    ctx->allow_symlinks = true;
     ctx->existing_loaded = false;
     ctx->zipinfo_mode = false;
     ctx->zi_format = ZU_ZI_FMT_SHORT;
@@ -51,6 +53,8 @@ ZContext* zu_context_create(void) {
     ctx->store_symlinks = false;
     ctx->set_archive_mtime = false;
     ctx->newest_mtime_valid = false;
+    ctx->copy_mode = false;
+    ctx->test_command = NULL;
 
     zu_strlist_init(&ctx->include);
     zu_strlist_init(&ctx->include_patterns);
@@ -96,6 +100,7 @@ void zu_context_free(ZContext* ctx) {
     free(ctx->zip_comment);
     free(ctx->temp_dir);
     free(ctx->password);
+    free(ctx->test_command);
     free(ctx);
 }
 

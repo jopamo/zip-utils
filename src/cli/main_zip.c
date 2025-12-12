@@ -99,12 +99,6 @@ static void emit_zip_stub_warnings(ZContext* ctx, bool invoked_as_zipcloak) {
     if (ctx->fix_archive || ctx->fix_fix_archive) {
         warn_stub(ctx, ctx->fix_fix_archive ? "-FF" : "-F", "recovery semantics are still under validation");
     }
-    if (ctx->exclude_extra_attrs) {
-        warn_stub(ctx, "-X", "extra field stripping differs from Info-ZIP 3.0");
-    }
-    if (ctx->used_long_option) {
-        warn_stub(ctx, "long options", "alias/negation coverage is incomplete; only implemented flags are wired");
-    }
     if (invoked_as_zipcloak) {
         warn_stub(ctx, "zipcloak", "only encrypts new writes; existing entries are left untouched");
     }
@@ -710,6 +704,21 @@ static int parse_long_option(const char* tok, int argc, char** argv, int* idx, Z
         zu_trace_option(ctx, "--test after write");
         return ZU_STATUS_OK;
     }
+    if (strcmp(name, "test-command") == 0) {
+        if (!value) {
+            if (*idx + 1 >= argc) {
+                fprintf(stderr, "zip: --test-command requires an argument\n");
+                return ZU_STATUS_USAGE;
+            }
+            value = argv[++(*idx)];
+        }
+        free(ctx->test_command);
+        ctx->test_command = strdup(value);
+        if (!ctx->test_command)
+            return ZU_STATUS_OOM;
+        zu_trace_option(ctx, "--test-command");
+        return ZU_STATUS_OK;
+    }
     if (strcmp(name, "quiet") == 0) {
         ctx->quiet_level++;
         ctx->quiet = ctx->quiet_level > 0;
@@ -756,6 +765,23 @@ static int parse_long_option(const char* tok, int argc, char** argv, int* idx, Z
         }
         ctx->output_path = value;
         zu_trace_option(ctx, "--output-file=%s", value);
+        return ZU_STATUS_OK;
+    }
+    if (strcmp(name, "out") == 0) {
+        if (!value) {
+            if (*idx + 1 >= argc) {
+                fprintf(stderr, "zip: --out requires an argument\n");
+                return ZU_STATUS_USAGE;
+            }
+            value = argv[++(*idx)];
+        }
+        ctx->output_path = value;
+        zu_trace_option(ctx, "--out=%s", value);
+        return ZU_STATUS_OK;
+    }
+    if (strcmp(name, "copy") == 0) {
+        ctx->copy_mode = true;
+        zu_trace_option(ctx, "--copy mode enabled");
         return ZU_STATUS_OK;
     }
     if (strcmp(name, "la") == 0 || strcmp(name, "log-append") == 0) {
@@ -849,6 +875,33 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
             if (strcmp(tok, "-sp") == 0) {
                 fprintf(stderr, "zip: split archives are not supported in this build\n");
                 return ZU_STATUS_NOT_IMPLEMENTED;
+            }
+            if (strcmp(tok, "-R") == 0) {
+                ctx->recursive = true;
+                ctx->recurse_from_cwd = true;
+                zu_trace_option(ctx, "-R recurse with patterns");
+                ++i;
+                continue;
+            }
+            if (strcmp(tok, "-U") == 0) {
+                ctx->copy_mode = true;
+                zu_trace_option(ctx, "-U copy mode");
+                ++i;
+                continue;
+            }
+            if (strcmp(tok, "-TT") == 0) {
+                if (i + 1 >= argc) {
+                    fprintf(stderr, "zip: -TT requires a command\n");
+                    return ZU_STATUS_USAGE;
+                }
+                free(ctx->test_command);
+                ctx->test_command = strdup(argv[++i]);
+                if (!ctx->test_command) {
+                    return ZU_STATUS_OOM;
+                }
+                zu_trace_option(ctx, "-TT custom test command");
+                ++i;
+                continue;
             }
             if (strcmp(tok, "-FF") == 0) {
                 ctx->fix_fix_archive = true;

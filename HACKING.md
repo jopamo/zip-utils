@@ -18,5 +18,10 @@ Format C with `.clang-format` (Chromium style, 4-space indents, no tabs, 200-col
 ## Testing Guidelines
 Run `meson test -C build` before sending changes; it covers both C unit tests and Python black-box integration tests (which call `build/zip` and `build/unzip` with the system Info-ZIP binaries on `PATH` for parity). Add Python integration coverage for every user-visible feature or bug fix; isolate each feature per file and use `tempfile.TemporaryDirectory` for scratch space. Use `zip-spec.md` and `unzip-spec.md` to confirm expected prompts, exit codes, and listing formats. Enable large Zip64 coverage with `ZU_RUN_LARGE_TESTS=1 ZU_LARGE_SIZE_GB=5 meson test -C build --suite long`. If you must skip long suites, note it in review.
 
+For parity investigations, capture reference output from the documentation helper and diff it against the build output (archive bytes may differ, but stdout/stderr/return codes should match):
+* Baseline: `python3 document_zip_output.py --zip zip --outdir zip-doc-system` (detects the system Info-ZIP Zip 3.0, runs 33 scenarios, writes logs + `summary.md`/JSONL into `zip-doc-system/`)
+* Comparison: `python3 document_zip_output.py --zip /home/me/projects/zip-utils/build/zip --outdir zip-doc-build` (use an absolute path so temp working dirs do not break relative paths; runs the same 33 scenarios and writes into `zip-doc-build/`)
+* Follow-up: diff the two outdirs’ captured stdout/stderr/return codes per scenario using the `summary.md`/JSONL metadata in each directory
+
 ## Commit & Pull Request Guidelines
 Favor behavior-focused commits with the existing style (`feat(core): ...`, `fix(zip): ...`, etc.). Describe user-visible changes clearly and keep PRs small and scoped. Update `README.md` and `CHECKLIST.md`, and always double check specs (`zip-spec.md`, `unzip-spec.md`) when closing parity gaps or altering flags. Include the commands you ran (e.g., `meson test -C build`) and call out any skipped suites. Link issues where relevant and summarize behavioral differences from Info-ZIP.

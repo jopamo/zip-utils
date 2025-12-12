@@ -17,6 +17,17 @@
 #define FNM_CASEFOLD 0
 #endif
 
+static const char* strip_leading_dot_slash(const char* path) {
+    const char* p = path ? path : "";
+    while (p[0] == '.' && p[1] == '/') {
+        p += 2;
+    }
+    if (p[0] == '.' && p[1] == '\0') {
+        return p + 1; /* Treat "." as empty */
+    }
+    return p;
+}
+
 static void close_file(FILE** fp) {
     if (fp && *fp) {
         fclose(*fp);
@@ -118,12 +129,15 @@ static int walk_dir(ZContext* ctx, const char* root, ZU_StrList* list) {
     /* Add directory entry itself (Info-ZIP adds directory entries with trailing '/') */
     if (!ctx->no_dir_entries && ctx->store_paths) {
         char dir_entry[4096];
-        int dir_len = snprintf(dir_entry, sizeof(dir_entry), "%s/", root);
-        if (dir_len >= (int)sizeof(dir_entry)) {
-            zu_log(ctx, "warning: path too long %s/\n", root);
-        }
-        else {
-            zu_strlist_push(list, dir_entry);
+        const char* normalized = strip_leading_dot_slash(root);
+        if (normalized[0] != '\0') {
+            int dir_len = snprintf(dir_entry, sizeof(dir_entry), "%s/", normalized);
+            if (dir_len >= (int)sizeof(dir_entry)) {
+                zu_log(ctx, "warning: path too long %s/\n", normalized);
+            }
+            else {
+                zu_strlist_push(list, dir_entry);
+            }
         }
     }
 
@@ -153,10 +167,74 @@ static int walk_dir(ZContext* ctx, const char* root, ZU_StrList* list) {
             walk_dir(ctx, path, list);
         }
         else if (S_ISREG(st.st_mode) || (ctx->allow_symlinks && S_ISLNK(st.st_mode))) {
-            if (zu_strlist_push(list, path) != 0) {
+            const char* normalized = strip_leading_dot_slash(path);
+            if (zu_strlist_push(list, normalized) != 0) {
                 closedir(d);
                 return ZU_STATUS_OOM;
             }
+        }
+    }
+    closedir(d);
+    return ZU_STATUS_OK;
+}
+
+static bool matches_any_pattern(const ZU_StrList* patterns, const char* path, bool match_case) {
+    if (!patterns || patterns->len == 0) {
+        return true;
+    }
+    int flags = match_case ? 0 : FNM_CASEFOLD;
+    for (size_t i = 0; i < patterns->len; ++i) {
+        if (fnmatch(patterns->items[i], path, flags) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int walk_dir_patterns(ZContext* ctx, const char* root, ZU_StrList* out, const ZU_StrList* patterns) {
+    DIR* d = opendir(root);
+    if (!d) {
+        return ZU_STATUS_OK;
+    }
+
+    struct dirent* entry;
+    while ((entry = readdir(d)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        char path[4096];
+        if (strcmp(root, ".") == 0 || root[0] == '\0') {
+            snprintf(path, sizeof(path), "%s", entry->d_name);
+        }
+        else {
+            snprintf(path, sizeof(path), "%s/%s", root, entry->d_name);
+        }
+
+        struct stat st;
+        if (lstat(path, &st) != 0) {
+            continue;
+        }
+
+        if (S_ISDIR(st.st_mode)) {
+            walk_dir_patterns(ctx, path, out, patterns);
+            continue;
+        }
+
+        if (!(S_ISREG(st.st_mode) || (ctx->allow_symlinks && S_ISLNK(st.st_mode)) || (ctx->allow_fifo && S_ISFIFO(st.st_mode)))) {
+            continue;
+        }
+
+        const char* normalized = strip_leading_dot_slash(path);
+        if (!matches_any_pattern(patterns, normalized, ctx->match_case)) {
+            continue;
+        }
+        if (!zu_should_include(ctx, normalized)) {
+            continue;
+        }
+        if (zu_strlist_push(out, normalized) != 0) {
+            closedir(d);
+            return ZU_STATUS_OOM;
         }
     }
     closedir(d);
@@ -190,6 +268,19 @@ int zu_expand_args(ZContext* ctx) {
     if (!ctx)
         return ZU_STATUS_USAGE;
 
+    if (ctx->recursive && ctx->recurse_from_cwd) {
+        ZU_StrList collected;
+        zu_strlist_init(&collected);
+        int rc = walk_dir_patterns(ctx, ".", &collected, &ctx->include);
+        if (rc != ZU_STATUS_OK) {
+            zu_strlist_free(&collected);
+            return rc;
+        }
+        zu_strlist_free(&ctx->include);
+        ctx->include = collected;
+        return ZU_STATUS_OK;
+    }
+
     if (!ctx->recursive) {
         return ZU_STATUS_OK;
     }
@@ -208,7 +299,10 @@ int zu_expand_args(ZContext* ctx) {
         }
         else {
             /* Just copy */
-            zu_strlist_push(&new_list, path);
+            const char* normalized = strip_leading_dot_slash(path);
+            if (*normalized != '\0') {
+                zu_strlist_push(&new_list, normalized);
+            }
         }
     }
 

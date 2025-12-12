@@ -18,6 +18,9 @@
 #include <unistd.h>
 #include <zlib.h>
 #include <fnmatch.h>
+#ifndef FNM_CASEFOLD
+#define FNM_CASEFOLD 0
+#endif
 
 #include "crc32.h"
 #include "fileio.h"
@@ -178,6 +181,23 @@ static int ensure_entry_capacity(zu_entry_list* list) {
 
 static bool path_is_stdin(const char* path) {
     return path && strcmp(path, "-") == 0;
+}
+
+static bool copy_mode_keep(const ZContext* ctx, const char* name) {
+    if (!ctx || !name) {
+        return false;
+    }
+    int flags = ctx->match_case ? 0 : FNM_CASEFOLD;
+    bool match_inputs = ctx->include.len == 0;
+    for (size_t i = 0; i < ctx->include.len && !match_inputs; ++i) {
+        if (fnmatch(ctx->include.items[i], name, flags) == 0) {
+            match_inputs = true;
+        }
+    }
+    if (!match_inputs) {
+        return false;
+    }
+    return zu_should_include(ctx, name);
 }
 
 static bool should_store_by_suffix(const ZContext* ctx, const char* path) {
@@ -428,7 +448,8 @@ static bool should_compress_file(ZContext* ctx, const zu_input_info* info, const
         return false;
     }
     /* Mimic Info-ZIP heuristics: tiny files are stored to avoid overhead. */
-    if (info && info->size_known && info->st.st_size <= 4096) {
+    /* For stdin staging, stick to deflate to match upstream filter-mode output. */
+    if (info && info->size_known && !info->is_stdin && info->st.st_size <= 4096) {
         return false;
     }
     return true;
@@ -1416,6 +1437,7 @@ static int write_stdin_staged_entry(ZContext* ctx,
 
     zu_input_info staged_info = *info;
     staged_info.size_known = true;
+    /* Treat staged stdin like a regular file so normal store heuristics apply in filter mode too. */
     staged_info.is_stdin = false;
     staged_info.st.st_size = (off_t)staged.size;
 
@@ -1875,6 +1897,9 @@ int zu_modify_archive(ZContext* ctx) {
     }
     srand(time(NULL));
     ctx->current_offset = 0;
+    char* temp_path = NULL;
+    const char* target_path = ctx->output_path ? ctx->output_path : ctx->archive_path;
+    int rc = ZU_STATUS_OK;
 
     /* 1. Load existing archive if requested and it exists */
     bool existing_loaded = false;
@@ -1893,25 +1918,61 @@ int zu_modify_archive(ZContext* ctx) {
         }
     }
 
+    /* Copy-only mode (-U/--copy) selects existing entries to copy to a new archive. */
+    size_t copy_selected = 0;
+    if (ctx->copy_mode) {
+        if (!ctx->output_path) {
+            zu_context_set_error(ctx, ZU_STATUS_USAGE, "copy mode requires --out");
+            return ZU_STATUS_USAGE;
+        }
+        if (!existing_loaded) {
+            zu_context_set_error(ctx, ZU_STATUS_USAGE, "copy mode requires an existing archive");
+            return ZU_STATUS_USAGE;
+        }
+        for (size_t i = 0; i < ctx->existing_entries.len; ++i) {
+            zu_existing_entry* e = (zu_existing_entry*)ctx->existing_entries.items[i];
+            bool keep = copy_mode_keep(ctx, e->name);
+            e->delete = !keep;
+            e->changed = keep || e->changed;
+            if (keep) {
+                copy_selected++;
+            }
+        }
+    }
+
     /* 2. Process Input Files and Mark Changes */
     /* If difference_mode, ctx->include contains items to delete.
        Otherwise, ctx->include contains items to add/update. */
 
+    size_t delete_selected = 0;
     if (ctx->difference_mode) {
+        bool time_filter_applied = ctx->has_filter_before || ctx->has_filter_after;
         /* Mark entries for deletion */
         for (size_t i = 0; i < ctx->include.len; ++i) {
             const char* pattern = ctx->include.items[i];
             for (size_t j = 0; j < ctx->existing_entries.len; ++j) {
                 zu_existing_entry* e = (zu_existing_entry*)ctx->existing_entries.items[j];
                 if (!e->delete && fnmatch(pattern, e->name, 0) == 0) {
+                    if (time_filter_applied) {
+                        /* Upstream zip ignores -t/-tt in delete mode; mirror by treating as no-op. */
+                        continue;
+                    }
                     e->delete = true;
                     e->changed = true;
+                    delete_selected++;
                     log_delete_action(ctx, e->name);
                 }
             }
         }
+        if (time_filter_applied || delete_selected == 0) {
+            rc = ZU_STATUS_NO_FILES;
+            if (!ctx->quiet && target_path) {
+                printf("\nzip error: Nothing to do! (%s)\n", target_path);
+            }
+            goto cleanup;
+        }
     }
-    else {
+    else if (!ctx->copy_mode) {
         /* Add / Update Mode */
 
         /* 2a. Expand directories if recursion enabled */
@@ -1950,8 +2011,6 @@ int zu_modify_archive(ZContext* ctx) {
     }
 
     /* 3. Open Output */
-    char* temp_path = NULL;
-    const char* target_path = ctx->output_path ? ctx->output_path : ctx->archive_path;
 
     if (!ctx->dry_run) {
         if (ctx->output_to_stdout) {
@@ -1976,14 +2035,16 @@ int zu_modify_archive(ZContext* ctx) {
 
     zu_entry_list entries = {0};
     uint64_t offset = 0;
-    int rc = ZU_STATUS_OK;
     size_t added = 0;
     uint64_t zip64_trigger = zip64_trigger_bytes();
+    if (ctx->copy_mode) {
+        added = copy_selected;
+    }
 
     /* 4. Write Entries */
 
     /* 4a. Write New/Updated Files (unless delete mode) */
-    if (!ctx->difference_mode) {
+    if (!ctx->difference_mode && !ctx->copy_mode) {
         for (size_t i = 0; i < ctx->include.len; ++i) {
             const char* path = ctx->include.items[i];
             /* Exclude/include pattern filtering */
@@ -2360,6 +2421,9 @@ int zu_modify_archive(ZContext* ctx) {
     /* Check if any files were added/updated or metadata changed */
     if (added == 0 && !ctx->difference_mode && !existing_changes && !ctx->zip_comment_specified && !ctx->set_archive_mtime) {
         rc = ZU_STATUS_NO_FILES;
+        if (!ctx->quiet && target_path && !ctx->update && !ctx->freshen) {
+            printf("\nzip error: Nothing to do! (%s)\n", target_path);
+        }
     }
 
     if (ctx->dry_run) {
@@ -2385,6 +2449,9 @@ int zu_modify_archive(ZContext* ctx) {
                 uint64_t new_offset = offset;
                 uint32_t entry_disk_start = current_disk_index(ctx);
                 uint64_t entry_lho_offset = ctx->current_offset;
+                if (ctx->copy_mode && !ctx->quiet) {
+                    progress_log(ctx, " copying: %s\n", e->name);
+                }
                 rc = copy_existing_entry(ctx, e, &written);
                 if (rc != ZU_STATUS_OK)
                     goto cleanup;

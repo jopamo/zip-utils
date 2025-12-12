@@ -46,6 +46,7 @@ struct ZContext {
     int compression_level;  /* 0-9 */
     int compression_method; /* 8=deflate, 12=bzip2 */
     bool recursive;
+    bool recurse_from_cwd; /* -R */
     bool store_paths;
     bool remove_source;
     bool test_integrity;
@@ -124,10 +125,12 @@ struct ZContext {
     /* Encryption */
     bool encrypt;
     char* password;
+    char* test_command;
 
     /* Archive Fixing */
     bool fix_archive;     /* -F */
     bool fix_fix_archive; /* -FF */
+    bool copy_mode;       /* -U / --copy */
 
     /* Error reporting */
     int last_error;
