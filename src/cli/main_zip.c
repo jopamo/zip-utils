@@ -616,6 +616,7 @@ static int push_suffixes(ZContext* ctx, const char* str) {
             free(suf);
             return ZU_STATUS_OOM;
         }
+        free(suf);
         p += (*p == ':') ? 1 : 0;
     }
     return ZU_STATUS_OK;
