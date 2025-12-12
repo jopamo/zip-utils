@@ -72,6 +72,29 @@ static uint64_t parse_size(const char* str) {
     return (uint64_t)(val * mult);
 }
 
+static int read_stdin_names(ZContext* ctx) {
+    char* line = NULL;
+    size_t linecap = 0;
+    ssize_t linelen;
+    while ((linelen = getline(&line, &linecap, stdin)) != -1) {
+        if (linelen > 0 && line[linelen - 1] == '\n') {
+            line[linelen - 1] = '\0';
+            linelen--;
+        }
+        if (linelen > 0) {
+            if (zu_strlist_push(&ctx->include, line) != 0) {
+                free(line);
+                return ZU_STATUS_OOM;
+            }
+        }
+    }
+    free(line);
+    if (ferror(stdin)) {
+        return ZU_STATUS_IO;
+    }
+    return ZU_STATUS_OK;
+}
+
 static bool is_alias(const char* argv0, const char* name) {
     const char* base = strrchr(argv0, '/');
     base = base ? base + 1 : argv0;
@@ -425,9 +448,10 @@ static void print_usage(FILE* to, const char* argv0) {
             "  -r, --recurse-paths   Recurse into directories\n"
             "  -j                    Junk directory paths\n"
             "  -m                    Move input files (delete after)\n"
+            "  -d                    Delete entries in zipfile\n"
+            "  -@                    Read names from stdin\n"
             "  -u                    Update: add only newer files\n"
             "  -f                    Freshen: replace existing entries\n"
-            "  -FS                   File Sync: update and delete missing\n"
             "  -T                    Test archive after writing\n"
             "  -q / -qq / -v         Quiet / really quiet / verbose output\n"
             "  -x pattern            Exclude pattern (can repeat)\n"
@@ -440,23 +464,36 @@ static void print_usage(FILE* to, const char* argv0) {
 
 static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote) {
     static const struct option long_opts[] = {
-        {"recurse-paths", no_argument, NULL, 'r'}, {"test", no_argument, NULL, 'T'},
-        {"quiet", no_argument, NULL, 'q'},         {"verbose", no_argument, NULL, 'v'},
-        {"encrypt", no_argument, NULL, 'e'},       {"password", required_argument, NULL, 'P'},
-        {"help", no_argument, NULL, 'h'},          {"output-file", required_argument, NULL, 'O'},
-        {"la", no_argument, NULL, 1001},           {"log-append", no_argument, NULL, 1001},
-        {"lf", required_argument, NULL, 1002},     {"logfile-path", required_argument, NULL, 1002},
-        {"li", no_argument, NULL, 1003},           {"log-info", no_argument, NULL, 1003},
-        {"tt", required_argument, NULL, 1004},     {"filesync", no_argument, NULL, 1005},
-        {"FS", no_argument, NULL, 1005},           {"split-size", required_argument, NULL, 's'},
-        {"pause", no_argument, NULL, 1006},        {"sp", no_argument, NULL, 1006},
-        {"fix", no_argument, NULL, 'F'},           {"FF", no_argument, NULL, 1007},
-        {"fixfix", no_argument, NULL, 1007},       {NULL, 0, NULL, 0},
+        {"recurse-paths", no_argument, NULL, 'r'},
+        {"test", no_argument, NULL, 'T'},
+        {"quiet", no_argument, NULL, 'q'},
+        {"verbose", no_argument, NULL, 'v'},
+        {"encrypt", no_argument, NULL, 'e'},
+        {"password", required_argument, NULL, 'P'},
+        {"help", no_argument, NULL, 'h'},
+        {"output-file", required_argument, NULL, 'O'},
+        {"la", no_argument, NULL, 1001},
+        {"log-append", no_argument, NULL, 1001},
+        {"lf", required_argument, NULL, 1002},
+        {"logfile-path", required_argument, NULL, 1002},
+        {"li", no_argument, NULL, 1003},
+        {"log-info", no_argument, NULL, 1003},
+        {"tt", required_argument, NULL, 1004},
+        {"filesync", no_argument, NULL, 1005},
+        {"FS", no_argument, NULL, 1005},
+        {"split-size", required_argument, NULL, 's'},
+        {"pause", no_argument, NULL, 1006},
+        {"sp", no_argument, NULL, 1006},
+        {"fix", no_argument, NULL, 'F'},
+        {"FF", no_argument, NULL, 1007},
+        {"fixfix", no_argument, NULL, 1007},
+        {"ll", no_argument, NULL, 1008},
+        {NULL, 0, NULL, 0},
     };
 
     int opt;
     // Added O, t to short opts
-    while ((opt = getopt_long_only(argc, argv, "rjTqvmdfui:x:0123456789heP:O:t:Z:s:Fzw", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long_only(argc, argv, "rjTqvmdfui:x:0123456789heP:O:t:Z:s:Fzw@cob:n:DAJXyl", long_opts, NULL)) != -1) {
         switch (opt) {
             case 'r':
                 ctx->recursive = true;
@@ -507,6 +544,9 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
             case 1007:  // -FF
                 ctx->fix_fix_archive = true;
                 break;
+            case 1008:  // -ll
+                fprintf(stderr, "zip: -ll (convert CR LF to LF) not supported in this version\n");
+                return ZU_STATUS_NOT_IMPLEMENTED;
             case 'T':
                 ctx->test_integrity = true;
                 break;
@@ -559,7 +599,7 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                 ctx->log_info = true;
                 break;
             case 'i':
-                if (zu_strlist_push(&ctx->include, optarg) != 0)
+                if (zu_strlist_push(&ctx->include_patterns, optarg) != 0)
                     return ZU_STATUS_OOM;
                 break;
             case 'x':
@@ -596,6 +636,42 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
             case 'z':
                 ctx->zip_comment_specified = true;
                 break;
+            case '@': {
+                int rc = read_stdin_names(ctx);
+                if (rc != ZU_STATUS_OK) {
+                    return rc;
+                }
+            } break;
+            case 'c':
+                fprintf(stderr, "zip: -c (add one-line comments) not supported in this version\n");
+                return ZU_STATUS_NOT_IMPLEMENTED;
+            case 'o':
+                fprintf(stderr, "zip: -o (make zipfile as old as latest entry) not supported in this version\n");
+                return ZU_STATUS_NOT_IMPLEMENTED;
+            case 'b':
+                fprintf(stderr, "zip: -b (temp file path) not supported in this version\n");
+                return ZU_STATUS_NOT_IMPLEMENTED;
+            case 'n':
+                fprintf(stderr, "zip: -n (don't compress suffixes) not supported in this version\n");
+                return ZU_STATUS_NOT_IMPLEMENTED;
+            case 'D':
+                fprintf(stderr, "zip: -D (do not add directory entries) not supported in this version\n");
+                return ZU_STATUS_NOT_IMPLEMENTED;
+            case 'A':
+                fprintf(stderr, "zip: -A (adjust self-extracting exe) not supported in this version\n");
+                return ZU_STATUS_NOT_IMPLEMENTED;
+            case 'J':
+                fprintf(stderr, "zip: -J (junk zipfile prefix) not supported in this version\n");
+                return ZU_STATUS_NOT_IMPLEMENTED;
+            case 'X':
+                fprintf(stderr, "zip: -X (exclude extra file attributes) not supported in this version\n");
+                return ZU_STATUS_NOT_IMPLEMENTED;
+            case 'y':
+                fprintf(stderr, "zip: -y (store symbolic links as the link) not supported in this version\n");
+                return ZU_STATUS_NOT_IMPLEMENTED;
+            case 'l':
+                fprintf(stderr, "zip: -l (convert LF to CR LF) not supported in this version\n");
+                return ZU_STATUS_NOT_IMPLEMENTED;
             case 'w':
                 if (!is_zipnote) {
                     print_usage(stderr, argv[0]);

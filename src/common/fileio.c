@@ -343,12 +343,12 @@ bool zu_should_include(const ZContext* ctx, const char* name) {
     }
 
     /* If include list is empty, everything is included. */
-    if (ctx->include.len == 0) {
+    if (ctx->include_patterns.len == 0) {
         return true;
     }
 
-    for (size_t i = 0; i < ctx->include.len; ++i) {
-        if (fnmatch(ctx->include.items[i], name, flags) == 0) {
+    for (size_t i = 0; i < ctx->include_patterns.len; ++i) {
+        if (fnmatch(ctx->include_patterns.items[i], name, flags) == 0) {
             return true;
         }
     }
