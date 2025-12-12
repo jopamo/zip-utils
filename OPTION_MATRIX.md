@@ -37,15 +37,15 @@ Derived from `zip.txt` and `unzip.txt`. Status values:
 | `zipcloak` alias | partial | Enables encryption on new writes; no re-encrypt of existing entries. |
 | `zipsplit` alias | missing | Alias only. |
 | Logging `-la/-lf/-li` | working | Project-specific (not in man page). |
-| `-@` | missing | File list/response file from stdin. |
+| `-@` | working | Names from stdin. |
 | `-a`, `-A`, `-AC`, `-AS` | missing | ASCII translate; adjust SFX offsets; archive-bit handling. |
 | `-B`, `-Bn` | missing | Binary/Enscribe/Tandem flags. |
-| `-b` | missing | Temp-path selection. |
+| `-b` | working | Temp-path selection for staging. |
 | `-c` | missing | Per-entry comment prompts. |
 | `-C`, `-C2`, `-C5` | missing | VMS case-preservation options. |
 | `-db/-dc/-dd/-dg/-ds/-du/-dv` | missing | Progress meters and byte/volume displays. |
 | `-df`, `-du` | missing | Mac data-fork only, uncompressed-size display. |
-| `-D` | missing | Do not create directory entries. |
+| `-D` | working | Suppress directory entries (files still recurse). |
 | `-DF` | missing | Differential archive based on existing zip. |
 | `-E` | missing | OS/2 longnames. |
 | `-FI` | missing | Platform include flag. |
@@ -55,13 +55,12 @@ Derived from `zip.txt` and `unzip.txt`. Status values:
 | `-jj` | missing | Alternate junk-path behavior. |
 | `-J` | missing | Junk SFX when reading. |
 | `-k`, `-L`, `-LL` | missing | DOS/OS2/Unicode path handling toggles. |
-| `-l` | missing | Display license/info (Info-ZIP convention). |
-| `-ll` | missing | Alternate log/info mode (distinct from project logging). |
+| `-l`, `-ll` (text) | working | LF→CRLF / CRLF→LF translation; stored entries are uncompressed; metadata differs from Info-ZIP extras. |
 | `-MM` | missing | Must-match (fail if no files processed). |
-| `-n` | missing | Store uncompressed by suffix. |
+| `-n` | working | Case-insensitive suffix list, colon-delimited. |
 | `-nw`, `-ws` | missing | Wildcard stop-at-dir / warning tweaks. |
 | `-N` | missing | NTFS extra field storage. |
-| `-o` | missing | Set archive time to newest entry. |
+| `-o` | working | Archive mtime set to newest entry in output. |
 | `-p` | missing | Explicit "store paths" toggle (default behavior). |
 | `-Qn` | missing | QDOS headers. |
 | `-R`, `-RE` | missing | Recurse patterns / regex include. |
@@ -70,8 +69,8 @@ Derived from `zip.txt` and `unzip.txt`. Status values:
 | `-TT` | missing | Command hook after archive create. |
 | `-U`, `-UN` | missing | Unicode/UTF-8 handling. |
 | `-V`, `-VV`, `-w`, `-ww` | missing | VMS attribute/version handling. |
-| `-X` | missing | Do not save extra attributes. |
-| `-y` | missing | Store symlinks as links. |
+| `-X` | partial | Clears external attrs and drops Unix/timestamp extras when rewriting entries; other extras are kept. |
+| `-y` | working | Store symlinks as links (uses link target data). |
 | `-z` | working | Archive comments can be added/edited via `-z` even without other inputs; entry comments are preserved on rewrite (editing entry comments still pending). |
 | `-!` | missing | Use privileges (Amiga). |
 | `-fz-` | missing | Force Zip64 off. |

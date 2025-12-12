@@ -287,13 +287,15 @@ static int walk_dir(ZContext* ctx, const char* root, ZU_StrList* list) {
     }
 
     /* Add directory entry itself (Info-ZIP adds directory entries with trailing '/') */
-    char dir_entry[4096];
-    int dir_len = snprintf(dir_entry, sizeof(dir_entry), "%s/", root);
-    if (dir_len >= (int)sizeof(dir_entry)) {
-        zu_log(ctx, "warning: path too long %s/\n", root);
-    }
-    else {
-        zu_strlist_push(list, dir_entry);
+    if (!ctx->no_dir_entries && ctx->store_paths) {
+        char dir_entry[4096];
+        int dir_len = snprintf(dir_entry, sizeof(dir_entry), "%s/", root);
+        if (dir_len >= (int)sizeof(dir_entry)) {
+            zu_log(ctx, "warning: path too long %s/\n", root);
+        }
+        else {
+            zu_strlist_push(list, dir_entry);
+        }
     }
 
     struct dirent* entry;

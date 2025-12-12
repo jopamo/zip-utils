@@ -77,7 +77,13 @@ struct ZContext {
     bool zi_footer_explicit;
     bool zi_allow_pager;
     bool zi_show_comments;
-    int zi_format; /* enum-like selector for zipinfo output style */
+    int zi_format;            /* enum-like selector for zipinfo output style */
+    bool no_dir_entries;      /* -D */
+    bool exclude_extra_attrs; /* -X */
+    bool store_symlinks;      /* -y */
+    bool set_archive_mtime;   /* -o */
+    bool newest_mtime_valid;
+    time_t newest_mtime;
     char* zip_comment;
     size_t zip_comment_len;
     bool zip_comment_specified;

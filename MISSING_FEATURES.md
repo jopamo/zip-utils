@@ -25,14 +25,14 @@ See `OPTION_MATRIX.md` for a per-option breakdown.
 ## CLI Option Parity
 
 ### zip
-- [ ] Remaining man-page flags not parsed (examples: `-A`, `-@`, `-b`, `-B`, `-D`/`-DB`, `-df`/`-du`, `-g`, `-k`/`-L`/`-LL`, `-MM`, `-nw`/`-ws`, `-R`, `-S`, `-TT`, `-U*`, `-V`, `-X`, `-y`, `-!`, long-option aliases, response files).
+- [ ] Remaining man-page flags not parsed (examples: `-A`, `-B`, `-DF`, `-g`, `-k`/`-L`/`-LL`, `-MM`, `-nw`/`-ws`, `-R`, `-S`, `-TT`, `-U*`, `-V`, `-!`, long-option aliases, response files).
 - [x] Streaming input parity: treating `-` as stdin with data descriptors like Info-ZIP (`compress_to_temp`/CRC pre-pass currently requires seekable input).
 - [x] Entry comments preserved on rewrite; archive comments (including comment-only updates) are written with `-z`; entry comments editable via `zipnote -w`.
 - [ ] Full pattern/recursion parity: must-match semantics (`-MM`), hidden/system file handling, case-folding choices, and include/exclude precedence are not matched to Info-ZIP.
 - [ ] Self-extractor offset adjustments (`-A`) and SFX stub integration are missing.
 
 ### unzip / zipinfo
-- [ ] Missing/ignored flags from the man page: `-aa`, `-L`/`-LL`, `-j`, `-U`/`-UU`, `-V`, `-X`, `-O` (codepage), `-C` is implemented but no flag to force case-sensitivity back on, pager prompts beyond no-op `-M`, response files, and other long-option aliases.
+- [ ] Missing/ignored flags from the man page: `-aa`, `-L`/`-LL`, `-j`, `-U`/`-UU`, `-V`, `-O` (codepage), `-C` is implemented but no flag to force case-sensitivity back on, pager prompts beyond no-op `-M`, response files, and other long-option aliases.
 - [ ] Symlink/FIFO extraction is rejected (no `-y`-style allow flag); VMS/OS2/NTFS attribute preservation is absent.
 - [ ] Zipinfo parity gaps: header/footer suppression combinations, ISO/decimal time switches beyond current `-T`, and archive/entry comments formatting parity.
 - [ ] Multi-disk archive reading is not implemented (writer can emit splits, reader only opens single files).
@@ -46,7 +46,7 @@ See `OPTION_MATRIX.md` for a per-option breakdown.
 - [x] Comment handling: archive comments written and preserved; entry comments preserved and editable via `zipnote -w`.
 - [x] Split-archive support: writer emits splits; reader can open `.z01`/`.zip` by concatenating parts (disk metadata still simplified).
 - [ ] AES/WinZip encryption and newer compression methods (LZMA, PPMd, etc.) are not supported; only deflate/store/bzip2 + ZipCrypto exist.
-- [ ] Symlink/FIFO handling is blocked by default and lacks user-facing toggles; symbolic links are not stored as links.
+- [x] Symlink handling: stored as links with `-y`; FIFOs remain rejected without an allow flag.
 - [ ] Extended metadata (ACLs, EAs, UID/GID, NTFS timestamps, DOS attributes, UTF-8/codepage flags) is not preserved or configurable.
 - [ ] Self-extracting stubs and offset adjustment (`-A`) are not supported.
 - [ ] Partial platform behaviors from Info-ZIP (VMS, OS/2, Windows attribute handling, Amiga/Mac metadata) are out of scope today.

@@ -44,6 +44,11 @@ ZContext* zu_context_create(void) {
     ctx->has_filter_after = false;
     ctx->has_filter_before = false;
     ctx->line_mode = ZU_LINE_NONE;
+    ctx->no_dir_entries = false;
+    ctx->exclude_extra_attrs = false;
+    ctx->store_symlinks = false;
+    ctx->set_archive_mtime = false;
+    ctx->newest_mtime_valid = false;
 
     zu_strlist_init(&ctx->include);
     zu_strlist_init(&ctx->include_patterns);

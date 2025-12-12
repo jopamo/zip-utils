@@ -454,16 +454,17 @@ static void print_usage(FILE* to, const char* argv0) {
             "  Select:     -x patterns..., -i patterns... (lists end at next option/--)\n"
             "  Dates:      -t mmddyyyy (after), -tt mmddyyyy (before)\n"
             "  Compress:   -0..-9 level, -Z method (deflate/store/bzip2), -n suffixes store-only\n"
-            "  Output:     -O path (write elsewhere), -b dir (temp dir), \"-\" for stdout\n"
+            "  Output:     -O path (write elsewhere), -b dir (temp dir), -o archive mtime=max entry, \"-\" for stdout\n"
             "  Split:      -s size[kmgt], -sp pause between parts\n"
             "  Logging:    -lf file, -la append, -li info-level\n"
             "  Text:       -l LF->CRLF, -ll CRLF->LF\n"
+            "  Entries:    -D no dir entries, -X strip extra attrs, -y store symlinks as links\n"
             "  Quiet/Verb: -q (stackable) / -v, -T test after write\n"
             "  Fix:        -F / -FF\n"
             "  Encrypt:    -e, -P password\n"
             "  Comments:   -z (zipfile comment from stdin)\n"
             "  Zipnote:    -w (when invoked as zipnote)\n"
-            "  Not yet:    -c -o -D -X -y -A -J\n"
+            "  Not yet:    -c -A -J\n"
             "  --help      Show this help\n",
             argv0);
 }
@@ -523,14 +524,15 @@ static int apply_cluster_flag(char c, ZContext* ctx) {
             ctx->update = true;
             return ZU_STATUS_OK;
         case 'D':
-            fprintf(stderr, "zip: -D (do not add directory entries) not supported in this version\n");
-            return ZU_STATUS_NOT_IMPLEMENTED;
+            ctx->no_dir_entries = true;
+            return ZU_STATUS_OK;
         case 'X':
-            fprintf(stderr, "zip: -X (exclude extra file attributes) not supported in this version\n");
-            return ZU_STATUS_NOT_IMPLEMENTED;
+            ctx->exclude_extra_attrs = true;
+            return ZU_STATUS_OK;
         case 'y':
-            fprintf(stderr, "zip: -y (store symbolic links as the link) not supported in this version\n");
-            return ZU_STATUS_NOT_IMPLEMENTED;
+            ctx->store_symlinks = true;
+            ctx->allow_symlinks = true;
+            return ZU_STATUS_OK;
         case 'e':
             ctx->encrypt = true;
             return ZU_STATUS_OK;
@@ -620,6 +622,7 @@ static int push_suffixes(ZContext* ctx, const char* str) {
 }
 
 static int parse_suffix_list(ZContext* ctx, const char* first, int argc, char** argv, int* idx, bool* endopts) {
+    (void)endopts;
     if (first) {
         return push_suffixes(ctx, first);
     }
@@ -1009,8 +1012,9 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                 return ZU_STATUS_NOT_IMPLEMENTED;
             }
             if (strcmp(tok, "-o") == 0) {
-                fprintf(stderr, "zip: -o (make zipfile as old as latest entry) not supported in this version\n");
-                return ZU_STATUS_NOT_IMPLEMENTED;
+                ctx->set_archive_mtime = true;
+                ++i;
+                continue;
             }
             if (strcmp(tok, "-A") == 0) {
                 fprintf(stderr, "zip: -A (adjust self-extracting exe) not supported in this version\n");

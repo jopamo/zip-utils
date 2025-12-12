@@ -19,6 +19,7 @@ mkfixt() {
   head -c 4096 /dev/urandom > "$FIXT/blob.bin"
   printf '\x89PNG\r\n\x1a\n' > "$FIXT/fake.png"
   echo hi > "$FIXT/d/sub/hello.txt"
+  ln -s lf.txt "$FIXT/link_lf"
   printf 'x\n' > "$FIXT/spaced name.txt"
   printf 'y\n' > "$FIXT/--looks-like-opt"
   printf 'z\n' > "$FIXT/-looks-like-opt"
@@ -71,6 +72,19 @@ PY
   }
 
   echo "OK $name"
+}
+
+check_mtime() {
+  local name="$1"
+  local sys_out="$OUT/$name.sys.zip"
+  local my_out="$OUT/$name.my.zip"
+  local sys_m=$(stat -c %Y "$sys_out")
+  local my_m=$(stat -c %Y "$my_out")
+  if [[ "$sys_m" != "$my_m" ]]; then
+    echo "MISMATCH mtime $name sys=$sys_m my=$my_m" >&2
+    return 1
+  fi
+  return 0
 }
 
 main() {
@@ -184,6 +198,26 @@ main() {
   run_case split_64k \
     "$SYSZIP -s 64k $OUT/split_64k.sys.zip blob.bin" \
     "$MYZIP -s 64k $OUT/split_64k.my.zip blob.bin" || fails=$((fails+1))
+
+  run_case no_dirs \
+    "$SYSZIP -D -r $OUT/no_dirs.sys.zip d" \
+    "$MYZIP -D -r $OUT/no_dirs.my.zip d" || fails=$((fails+1))
+
+  run_case strip_attrs \
+    "$SYSZIP -X $OUT/strip_attrs.sys.zip lf.txt" \
+    "$MYZIP -X $OUT/strip_attrs.my.zip lf.txt" || fails=$((fails+1))
+
+  run_case symlink_store \
+    "$SYSZIP -y $OUT/symlink_store.sys.zip link_lf" \
+    "$MYZIP -y $OUT/symlink_store.my.zip link_lf" || fails=$((fails+1))
+
+  if run_case o_mtime \
+    "$SYSZIP -o $OUT/o_mtime.sys.zip old.txt new.txt" \
+    "$MYZIP -o $OUT/o_mtime.my.zip old.txt new.txt"; then
+    check_mtime o_mtime || fails=$((fails+1))
+  else
+    fails=$((fails+1))
+  fi
 
   echo
   echo "outputs: $OUT"
