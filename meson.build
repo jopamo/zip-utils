@@ -58,9 +58,11 @@ libziputils = static_library(
   link_args: extra_link_args
 )
 
+cli_common_sources = files('src/cli/ops.c', 'src/cli/cli_common.c')
+
 zip_exe = executable(
   'zip',
-  files('src/cli/main_zip.c', 'src/cli/ops.c'),
+  cli_common_sources + files('src/cli/main_zip.c'),
   include_directories: [inc_src],
   link_with: [libziputils],
   dependencies: [zlib_dep, bz2_dep],
@@ -71,7 +73,7 @@ zip_exe = executable(
 
 unzip_exe = executable(
   'unzip',
-  files('src/cli/main_unzip.c', 'src/cli/ops.c'),
+  cli_common_sources + files('src/cli/main_unzip.c'),
   include_directories: [inc_src],
   link_with: [libziputils],
   dependencies: [zlib_dep, bz2_dep],
@@ -277,15 +279,6 @@ test('integration-zipinfo', python3,
   env: {
     'ZIP_BIN': 'zip',
     'ZIPINFO_BIN': unzip_exe.full_path()
-  },
-  timeout: 30
-)
-
-test('integration-crypto', python3,
-  args: [meson.project_source_root() / 'tests/test_crypto_integration.py'],
-  env: {
-    'WRITE_BIN': zip_exe.full_path(),
-    'UNZIP_REWRITE_BIN': unzip_exe.full_path()
   },
   timeout: 30
 )

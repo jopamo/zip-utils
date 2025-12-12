@@ -1,298 +1,205 @@
-# zip-utils: ZIP Utility Specification
+# zip-utils unzip specification
 
 ## 1. Scope
 
-`zip-utils` is a Linux-only implementation of `zip` with an Info-ZIP–style CLI.
+This specification defines the Unix/Linux behavior for `unzip` in `zip-utils`
 
-This spec is **normative** for supported flags and observable behavior:
-
-* stdout/stderr shape (high-level compatibility)
-* exit codes
-* selection rules and side effects
-* archive correctness/compatibility (ZIP readers must accept output)
-
-Out-of-scope features are explicitly listed in §14.
-
----
+* Unix/Linux-only semantics
+* No split archive support
+* Supported archive format: standard ZIP with Store and Deflate methods
+* Observable behavior goal: match Info-ZIP **for the supported option set** (exit codes, stdout/stderr shape, side effects) ([Linux Documentation][1])
 
 ## 2. Invocation
 
 ```sh
-zip [options] archive.zip [inputs...]
+unzip [options] archive[.zip] [list...] [-x xlist...] [-d exdir]
 ```
 
 ### 2.1 Special operands
 
-* If `archive.zip` is `-`, write the resulting archive to stdout
-* If any input path is `-`, read file data from stdin and add a streamed entry
-* `--` ends option parsing; remaining args are literal paths
-* `-@` reads one input path per line from stdin
+* `archive == "-"` reads the archive from stdin (streaming read)
+* `--` ends option parsing; remaining arguments are treated as literal patterns
 
-Only **one stdin consumer** may be active (e.g., `-@` and `-` file data cannot both use stdin in the same run). If ambiguous, error.
+### 2.2 stdin consumption
 
----
+At most one stdin consumer is allowed:
 
-## 3. Option Parsing
+* archive input via `archive == "-"`
+
+If more than one would apply, fail with a usage error
+
+## 3. Parsing rules
 
 ### 3.1 Short options
 
-* Short options may be grouped where unambiguous (Info-ZIP style)
-* For short options that take a value, all forms must be accepted:
+* Short options may be grouped (`-qn` equivalent to `-q -n`)
+* Short options with values accept:
 
-  * `-ovalue`
-  * `-o value`
-  * `-o=value`
-
-To avoid ambiguity with 2-character options, parsing must match Info-ZIP conventions where practical.
+  * `-dDIR`
+  * `-d DIR`
+  * `-d=DIR`
 
 ### 3.2 Long options
 
-* Long options use:
+Long options are not supported unless explicitly listed by the project; unknown `--opt` must be rejected with a clear error
 
-  * `--opt=value` or `--opt value`
+### 3.3 Pattern list termination
 
-### 3.3 Terminators
+Lists for `list...` and `-x xlist...` end at:
 
-* `--` terminates options
-* Pattern lists for `-i`, `-x`, `-d`, and `--copy` end at the next token that begins with `-`, or `--`, or end-of-argv
+* the next token that begins with `-`, or
+* `--`, or
+* end of argv
 
----
+## 4. Operating modes
 
-## 4. Operating Modes
+Exactly one primary mode is active:
 
-### 4.1 External modes (select filesystem inputs)
+### 4.1 Extract (default)
 
-Default is **add**:
+* Extracts entries matching `list...` (or all entries if no list is provided)
+* Skips entries matching any `-x` pattern
+* By default, creates directories as needed (unless `-j` is used)
 
-* **add (default)**
-  Add new files; replace existing entries unconditionally
+### 4.2 List: `-l`
 
-* `-u` **update**
-  Add new files; replace only if filesystem mtime is newer than the archive entry mtime
+* Lists entries in short format
+* No extraction side effects
 
-* `-f` **freshen**
-  Replace existing only; do not add new entries
+### 4.3 Verbose list / version: `-v`
 
-* `-FS` **filesync**
-  Update if entry differs by **mtime or size**; delete entries with no matching filesystem object (see §10)
+* With only `-v` and no archive operand: print version info and exit success ([Linux Documentation][1])
+* Otherwise: list entries in verbose format
 
-### 4.2 Internal modes (select archive entries)
+### 4.4 Test: `-t`
 
-* `-d pattern...` **delete**
-  Delete archive entries whose stored paths match patterns
+* Tests compressed data for selected entries (as if extracting, but without writing files) ([Linux Documentation][1])
 
-* `-U` / `--copy pattern...` **copy selection mode**
-  Select entries in the input archive to copy to a new archive when used with `--out` (see §11)
+### 4.5 Comment: `-z`
 
----
+* Displays archive comment only ([Linux Documentation][1])
 
-## 5. Output Targeting
+### 4.6 Pipe extract: `-p`
 
-### 5.1 In-place update (default)
+* Writes file data for selected entries to stdout, concatenated, with no per-file headers ([Linux Documentation][1])
+* No filesystem writes occur (but errors and selection behavior still apply)
 
-If `archive.zip` exists, it is read and updated according to the selected mode.
+## 5. Selection, include/exclude, and matching
 
-### 5.2 Output to new archive: `--out`
+### 5.1 Matching target
 
-* `--out OUTARCHIVE` writes result to OUTARCHIVE instead of updating input in place
-* Input archive remains unchanged
-* `--out` overwrites any existing OUTARCHIVE
+Patterns match **stored archive paths** (not filesystem paths), using the normalization rules in §6.
 
-If no filesystem inputs are provided and `--out` is specified, all entries from the input archive are copied to the output archive (unless filtered by `--copy` / patterns).
+### 5.2 Application order
 
----
+1. Candidate entry set is determined by `list...` (or “all entries” if omitted)
+2. Candidates are removed if they match any `-x` pattern
+3. The remaining entries are processed by the active mode (extract/list/test/pipe/comment)
 
-## 6. Selection and Paths
+### 5.3 Wildcards (supported)
 
-### 6.1 Recursion
+* `*` matches any sequence of characters, including `/`
+* `?` matches any single character
+* bracket classes `[list]` match a character in the list
 
-* `-r` recurse into directories specified on the command line
-* `-R` recurse current directory and treat remaining path arguments as patterns to match within the traversal (Info-ZIP behavior subset)
+  * ranges supported `[a-f]`
+  * negation supported `[!bf]`
 
-### 6.2 Junk paths
+### 5.4 Case sensitivity
 
-* `-j` store only basenames; drop directory components
+* Pattern matching is case-sensitive
 
-### 6.3 Read list from stdin
+## 6. Path handling and security policy
 
-* `-@` reads one path per line from stdin (newline stripped)
-* Empty lines ignored
-* Paths are treated literally (no shell expansion)
+### 6.1 Stored path separator
 
----
+* Stored paths use `/` as the separator
 
-## 7. Include / Exclude Filters
+### 6.2 Normalization (for extraction)
 
-* `-i pattern...` include-only filter (logical OR across patterns)
-* `-x pattern...` exclude filter (logical OR across patterns)
+When extracting an entry, its stored path is normalized as follows:
 
-Filtering applies to the **stored archive path** that would be produced (after `-j`, recursion mapping, etc).
+* Leading `/` is stripped (entries are always treated as relative)
+* `.` path segments are removed
+* Any path which would escape the extraction root via `..` is **rejected as an error**
 
-Order:
+  * This includes `../x`, `a/../../x`, etc.
+* NUL bytes and other invalid path bytes are rejected
 
-1. candidate is produced from traversal / inputs
-2. include filter (if any) must match
-3. exclude filter (if any) must not match
+### 6.3 Extraction root
 
----
+* Default extraction root is the current working directory
+* `-d exdir` sets the extraction root to `exdir` (created if necessary)
 
-## 8. Pattern Matching Semantics
+### 6.4 Symlinks and special files
 
-* Globbing supports:
+* If an entry is a symlink (per Unix mode metadata), create a symlink
 
-  * `*` matches any sequence (including `/`)
-  * `?` matches any single character
-  * bracket classes `[abc]`, ranges `[a-z]`, negation `[!x]`
+  * The symlink target is taken from the entry data
+  * If the link target would be unsafe (e.g., absolute or escaping the root when later resolved), it is still created as a literal link string; **no dereference occurs during extraction**
+* Device nodes, FIFOs, and other special files are rejected (clear error, nonzero exit)
 
-Matching is case-sensitive on Linux.
+## 7. Filesystem write policy
 
----
+### 7.1 Directory creation
 
-## 9. Compression
+* By default, create parent directories as needed
+* `-j` junk paths: discard directory components and extract into the extraction root only
 
-* `-0..-9` compression level (`-0` == store)
-* `-Z store|deflate` compression method
-* `-n suffixes` store-only suffix list:
+  * If multiple entries map to the same basename, later entries follow overwrite policy (§7.2)
 
-  * suffix list is comma- or colon-separated
-  * suffix matching is case-insensitive
-  * matching files must be stored uncompressed regardless of level
+### 7.2 Overwrite policy
 
-If both `-Z` and `-0..-9` are specified, the last effective method/level selection wins following Info-ZIP precedence behavior.
+Default behavior: if a target path exists, prompt on the controlling tty (or fail in non-interactive contexts)
 
----
+Modifiers:
 
-## 10. Filesync and Deletion Details
+* `-n` never overwrite existing files (silently skip that entry) ([Linux Documentation][1])
+* `-o` overwrite existing files without prompting ([Linux Documentation][1])
 
-### 10.1 `-FS` (filesync)
+### 7.3 Timestamps and permissions
 
-For each filesystem candidate in the effective file set:
+* Restores mtime for extracted regular files by default
+* Restores basic Unix mode bits for regular files by default (respecting umask for newly created files)
+* No UID/GID restoration support in this fork (attempts must be rejected if options are provided)
 
-* if entry missing in archive: add
-* if entry exists:
+## 8. Logging and output shape
 
-  * replace if filesystem mtime differs from entry mtime **or** size differs
-  * otherwise retain by copying existing entry data where possible
+* `-q` quiet mode, stackable (`-qq` is quieter)
 
-Then remove from archive any entry that has no corresponding filesystem object in the effective file set.
+  * Suppresses most non-error messages; errors still go to stderr
+* In extract mode, successful extraction prints Info-ZIP-like “inflating:” / “extracting:” style lines unless `-q` suppresses them (exact wording is implementation-defined but must be stable)
 
-### 10.2 `-d` (delete)
+## 9. Unsupported options and features
 
-* Delete matches against **archive stored paths**
-* `-d` does not read filesystem inputs (unless also supplied by user for other reasons)
+The following must be rejected with a clear error and nonzero exit status:
 
----
+* Split archive reading
+* Case-insensitive matching (`-C`)
+* Lowercasing controls (`-L`, `-LL`)
+* UID/GID / ACL restore knobs (`-X`, `-XX`)
+* “Allow outside root” traversal knobs (Info-ZIP `-:`-like behavior)
+* Any option not explicitly listed in this spec
 
-## 11. Copy Mode (`-U` / `--copy`) with `--out`
+## 10. Exit codes
 
-Copy mode selects existing entries from the input archive and writes them to the output archive.
-
-Rules:
-
-* Requires an input archive
-* Intended for use with `--out`
-* Patterns match stored paths
-* May be combined with `-x` to exclude a subset of the copy set
-
-If `--out` is specified and no filesystem inputs are given:
-
-* default: copy all entries
-* with `--copy`: copy only selected entries
-
----
-
-## 12. Unix Semantics
-
-* `-y` store symlinks as symlinks (do not follow)
-
-* Without `-y`, symlinks are followed and the referenced file data is archived
-
-* `-X` strip extra attributes as implemented by this project
-
-  * must be stable and documented in release notes (what is stripped vs preserved)
-
----
-
-## 13. Output / Logging / Verification
-
-* `-q` quiet mode, stackable
-
-* `-v` verbose mode
-
-  * `zip -v` alone may print version information
-
-* `-T` test archive after writing
-
-  * must affect exit status on failure
-
-* `-b dir` temp directory for a seekable temp archive when needed
-
----
-
-## 14. File Side Effects
-
-* `-m` move into archive
-  After successful archive creation/update, delete original filesystem files that were added/replaced
-
-  * Deletion occurs only if the archive operation succeeded for that entry set
-  * For directories, behavior is implementation-defined but must not delete directory trees unless explicitly documented
-
-* `-o` set archive mtime
-  After writing, set the archive file mtime to match the newest entry mtime in the resulting archive
-
----
-
-## 15. Streaming Requirements
-
-* If output is stdout (`archive.zip == "-"`), the archive must be streamable
-* Data descriptors may be used when sizes/CRCs are not known up front
-* Implementation may use `-b` to spool to a temp file for broader compatibility when configured/required
-
----
-
-## 16. Exit Codes
-
-Target Info-ZIP compatibility:
+Exit codes follow Info-ZIP conventions (for the supported surface): ([Oracle Documentation][2])
 
 * `0` success
-* `1` warnings (non-fatal)
-* `2` fatal error (archive not produced or operation failed)
+* `1` warnings encountered (e.g., some files skipped) but overall processing completed ([Oracle Documentation][2])
+* `2` error in archive format ([Oracle Documentation][2])
+* `3` severe error in archive format ([Oracle Documentation][2])
+* `4` memory allocation failed during initialization ([Oracle Documentation][2])
+* `5` memory allocation / terminal I/O failed during password processing
 
-If you intentionally differ, you must document it in your test harness output and release notes.
+If the upstream Info-ZIP surface returns additional specific codes for conditions (e.g., “unsupported method”), this fork may either:
 
----
+* map them into the nearest Info-ZIP category above (1/2/3), **or**
+* preserve the numeric code **if** the project documents the mapping deterministically
 
-## 17. Intentionally Unsupported Options
+## 11. Quick reference (supported option set)
 
-These are explicitly out of scope for `zip-utils`:
-
-* Comments / SFX: `-c`, `-z`, `-A`, `-J`
-* Weak encryption: `-e`, `-P`
-* Fix/salvage: `-F`, `-FF`
-* Split archives: `-s`, `-sp`, `-sb`, `-sv`
-* Dot/count UI knobs: `-db`, `-dc`, `-dd`, `-dg`, `-ds`, `-du`, `-dv`
-* Logging framework: `-lf`, `-la`, `-li`
-* Diagnostics toggles: `-MM`, `-nw`, `-sc`, `-sd`, `-so`, `-ws`
-* Non-Linux semantics: `-AS`, `-AC`, `-RE`, `-V`, `-l`, `-ll`, `-ic`, `-FI`, Unicode policy knobs (`-UN=...`)
-* Difference mode: `-DF` / `--dif`
-
----
-
-## 18. Examples
-
-```sh
-zip out.zip file1 file2 dir/file3
-zip -r out.zip .
-zip -r out.zip . -x "*.o" "*.a" -x "build/*"
-zip -r out.zip . -i "*.c" "*.h"
-zip -r - . > out.zip
-printf "hello\n" | zip out.zip -
-find . -type f -print | zip -@ out.zip
-zip -u release.zip src/*.c include/*.h
-zip -f release.zip src/*.c
-zip release.zip -d "build/*" "*.tmp"
-zip old.zip --out new.zip
-zip old.zip --copy "*.c" --out c-only.zip -x foo.c
-zip -m release.zip dist/*   # move into archive
-zip -o release.zip src/*    # set archive mtime to newest entry
-```
+* Modes: `-l`, `-v`, `-t`, `-z`, `-p`
+* Extraction target: `-d exdir`
+* Filtering: `list...`, `-x xlist...`
+* Modifiers: `-q` (stackable), `-n`, `-o`, `-j`

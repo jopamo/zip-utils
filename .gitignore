@@ -6,3 +6,5 @@
 .llm/
 tags
 build*
+/zip-doc-*/
+/comparison-docs/

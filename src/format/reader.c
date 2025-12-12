@@ -550,27 +550,29 @@ static int read_cd_info(ZContext* ctx, zu_cd_info* info, bool load_comment) {
     return ZU_STATUS_OK;
 }
 
-static bool pattern_matches(const ZContext* ctx, const char* name) {
+static bool match_and_track(const ZContext* ctx, const char* name, bool* include_hits) {
     int flags = ctx->match_case ? 0 : FNM_CASEFOLD;
 
-    /* Exclude wins immediately. */
     for (size_t i = 0; i < ctx->exclude.len; ++i) {
         if (fnmatch(ctx->exclude.items[i], name, flags) == 0) {
             return false;
         }
     }
 
-    /* If include list is empty, everything is included. */
     if (ctx->include.len == 0) {
         return true;
     }
 
+    bool matched = false;
     for (size_t i = 0; i < ctx->include.len; ++i) {
         if (fnmatch(ctx->include.items[i], name, flags) == 0) {
-            return true;
+            matched = true;
+            if (include_hits) {
+                include_hits[i] = true;
+            }
         }
     }
-    return false;
+    return matched;
 }
 
 static bool path_has_traversal(const char* name) {
@@ -619,22 +621,27 @@ static int ensure_parent_dirs(const char* path) {
 }
 
 static char* build_output_path(const ZContext* ctx, const char* name) {
+    const char* name_part = name;
+    if (!ctx->store_paths) {
+        const char* slash = strrchr(name, '/');
+        name_part = slash ? slash + 1 : name;
+    }
     const char* base = ctx->target_dir ? ctx->target_dir : "";
     size_t base_len = strlen(base);
     bool need_sep = base_len > 0 && base[base_len - 1] != '/';
-    size_t total = base_len + (need_sep ? 1 : 0) + strlen(name) + 1;
+    size_t total = base_len + (need_sep ? 1 : 0) + strlen(name_part) + 1;
     char* out = malloc(total);
     if (!out) {
         return NULL;
     }
     if (base_len == 0) {
-        snprintf(out, total, "%s", name);
+        snprintf(out, total, "%s", name_part);
     }
     else if (need_sep) {
-        snprintf(out, total, "%s/%s", base, name);
+        snprintf(out, total, "%s/%s", base, name_part);
     }
     else {
-        snprintf(out, total, "%s%s", base, name);
+        snprintf(out, total, "%s%s", base, name_part);
     }
     return out;
 }
@@ -895,6 +902,9 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
         if (!test_only) {
             if (ctx->output_to_stdout) {
                 return ZU_STATUS_OK; /* Skip directories when piping */
+            }
+            if (!ctx->store_paths) {
+                return ZU_STATUS_OK; /* Junk paths: ignore directory entries */
             }
             char* out_path = build_output_path(ctx, name);
             if (!out_path) {
@@ -1249,6 +1259,15 @@ int zu_list_archive(ZContext* ctx) {
         return ZU_STATUS_IO;
     }
 
+    bool* include_hits = NULL;
+    if (ctx->include.len > 0) {
+        include_hits = calloc(ctx->include.len, sizeof(bool));
+        if (!include_hits) {
+            zu_close_files(ctx);
+            return ZU_STATUS_OOM;
+        }
+    }
+
     uint64_t matched = 0;
     uint64_t total_comp = 0;
     uint64_t total_uncomp = 0;
@@ -1257,11 +1276,13 @@ int zu_list_archive(ZContext* ctx) {
     if (ctx->zipinfo_mode && ctx->zi_header && !ctx->quiet) {
         if (zi_print_line(ctx, &pager_lines, "Archive:  %s   %" PRIu64 " bytes   %" PRIu64 " files\n", ctx->archive_path, archive_size, cdinfo.entries_total) != 0) {
             zu_close_files(ctx);
+            free(include_hits);
             return ZU_STATUS_OK;
         }
         if (ctx->zi_list_entries) {
             if (zi_print_line(ctx, &pager_lines, "\n") != 0) {
                 zu_close_files(ctx);
+                free(include_hits);
                 return ZU_STATUS_OK;
             }
         }
@@ -1285,10 +1306,11 @@ int zu_list_archive(ZContext* ctx) {
             free(extra);
             free(comment);
             free(name);
+            free(include_hits);
             return rc;
         }
 
-        bool match = pattern_matches(ctx, name);
+        bool match = match_and_track(ctx, name, include_hits);
         if (match) {
             matched++;
             total_comp += comp_size;
@@ -1344,7 +1366,17 @@ int zu_list_archive(ZContext* ctx) {
             }
         }
         zu_close_files(ctx);
-        return ZU_STATUS_OK;
+        int final_rc = ZU_STATUS_OK;
+        if (include_hits && ctx->include.len > 0) {
+            for (size_t i = 0; i < ctx->include.len; ++i) {
+                if (!include_hits[i]) {
+                    fprintf(stderr, "caution: filename not matched:  %s\n", ctx->include.items[i]);
+                    final_rc = ZU_STATUS_NO_FILES;
+                }
+            }
+        }
+        free(include_hits);
+        return final_rc;
     }
 
     if (ctx->verbose && !ctx->quiet) {
@@ -1352,7 +1384,17 @@ int zu_list_archive(ZContext* ctx) {
     }
 
     zu_close_files(ctx);
-    return ZU_STATUS_OK;
+    int final_rc = ZU_STATUS_OK;
+    if (include_hits && ctx->include.len > 0) {
+        for (size_t i = 0; i < ctx->include.len; ++i) {
+            if (!include_hits[i]) {
+                fprintf(stderr, "caution: filename not matched:  %s\n", ctx->include.items[i]);
+                final_rc = ZU_STATUS_NO_FILES;
+            }
+        }
+    }
+    free(include_hits);
+    return final_rc;
 }
 
 static int walk_entries(ZContext* ctx, bool test_only) {
@@ -1360,8 +1402,17 @@ static int walk_entries(ZContext* ctx, bool test_only) {
         return ZU_STATUS_USAGE;
     }
 
+    bool* include_hits = NULL;
+    if (ctx->include.len > 0) {
+        include_hits = calloc(ctx->include.len, sizeof(bool));
+        if (!include_hits) {
+            return ZU_STATUS_OOM;
+        }
+    }
+
     int rc = zu_open_input(ctx, ctx->archive_path);
     if (rc != ZU_STATUS_OK) {
+        free(include_hits);
         return rc;
     }
 
@@ -1369,12 +1420,14 @@ static int walk_entries(ZContext* ctx, bool test_only) {
     rc = read_cd_info(ctx, &cdinfo, false);
     if (rc != ZU_STATUS_OK) {
         zu_close_files(ctx);
+        free(include_hits);
         return rc;
     }
 
     if (fseeko(ctx->in_file, (off_t)cdinfo.cd_offset, SEEK_SET) != 0) {
         zu_context_set_error(ctx, ZU_STATUS_IO, "seek to central directory failed");
         zu_close_files(ctx);
+        free(include_hits);
         return ZU_STATUS_IO;
     }
 
@@ -1387,6 +1440,7 @@ static int walk_entries(ZContext* ctx, bool test_only) {
         rc = read_central_entry(ctx, &hdr, &name, NULL, NULL, NULL, NULL, &comp_size, &uncomp_size, &lho_offset);
         if (rc != ZU_STATUS_OK) {
             zu_close_files(ctx);
+            free(include_hits);
             free(name);
             return rc;
         }
@@ -1395,11 +1449,12 @@ static int walk_entries(ZContext* ctx, bool test_only) {
         if (next_cd_pos < 0) {
             free(name);
             zu_close_files(ctx);
+            free(include_hits);
             zu_context_set_error(ctx, ZU_STATUS_IO, "ftello failed");
             return ZU_STATUS_IO;
         }
 
-        if (pattern_matches(ctx, name)) {
+        if (match_and_track(ctx, name, include_hits)) {
             rc = extract_or_test_entry(ctx, &hdr, name, test_only, comp_size, uncomp_size, lho_offset);
         }
         else {
@@ -1408,18 +1463,30 @@ static int walk_entries(ZContext* ctx, bool test_only) {
         free(name);
         if (rc != ZU_STATUS_OK) {
             zu_close_files(ctx);
+            free(include_hits);
             return rc;
         }
 
         if (fseeko(ctx->in_file, next_cd_pos, SEEK_SET) != 0) {
             zu_context_set_error(ctx, ZU_STATUS_IO, "seek to next central header failed");
             zu_close_files(ctx);
+            free(include_hits);
             return ZU_STATUS_IO;
         }
     }
 
     zu_close_files(ctx);
-    return ZU_STATUS_OK;
+    int final_rc = ZU_STATUS_OK;
+    if (include_hits && ctx->include.len > 0) {
+        for (size_t i = 0; i < ctx->include.len; ++i) {
+            if (!include_hits[i]) {
+                fprintf(stderr, "caution: filename not matched:  %s\n", ctx->include.items[i]);
+                final_rc = ZU_STATUS_NO_FILES;
+            }
+        }
+    }
+    free(include_hits);
+    return final_rc;
 }
 
 int zu_test_archive(ZContext* ctx) {

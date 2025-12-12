@@ -5,47 +5,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdbool.h>
+#include <ctype.h>
 
+#include "cli_common.h"
 #include "ctx.h"
 #include "ops.h"
 #include "ziputils.h"
 
 enum { OPT_DRY_RUN = 1000 };
 
-static bool argv0_is_zipinfo(const char* argv0) {
-    const char* base = strrchr(argv0, '/');
-    base = base ? base + 1 : argv0;
-    return strcmp(base, "zipinfo") == 0 || strcmp(base, "ii") == 0;
-}
-
-static void print_usage(FILE* to, const char* argv0) {
-    fprintf(to,
-            "Usage: %s [options] archive.zip [patterns...]\n"
-            "       %s -Z [zipinfo-options] archive.zip [patterns...]\n"
-            "\n"
-            "Modern rewrite: parses legacy-compatible options into a reentrant context.\n"
-            "\n"
-            "Common options:\n"
-            "  -l                    List contents only\n"
-            "  -t                    Test archive integrity (zipinfo: show totals footer)\n"
-            "  -d DIR                Extract into DIR\n"
-            "  -o / -n               Overwrite / never overwrite\n"
-            "  -q / -qq / -v         Quiet / really quiet / verbose output\n"
-            "  -x pattern            Exclude pattern (can repeat)\n"
-            "  -i pattern            Include only matching pattern\n"
-            "  -C                    Case-insensitive pattern matching\n"
-            "  --dry-run             Show what would be listed/extracted without writing\n"
-            "  --help, -?            Show this help\n"
-            "\n"
-            "Zipinfo options (-Z or run as \"zipinfo\"):\n"
-            "  -1 / -2               Filenames only (quiet / allow header+totals)\n"
-            "  -s / -m / -l / -v     Short (default) / medium / long listing / verbose\n"
-            "  -h / -t               Force header / totals footer (alone suppress entries)\n"
-            "  -T                    Decimal timestamps (yymmdd.hhmmss)\n"
-            "  -M                    Enable pager prompt (noop placeholder)\n"
-            "  -z                    Include archive comment (ignored)\n",
-            argv0, argv0);
-}
+static const char* g_tool_name = "unzip";
 
 static int map_exit_code(int status) {
     switch (status) {
@@ -53,12 +23,12 @@ static int map_exit_code(int status) {
             return 0;
         case ZU_STATUS_USAGE:
             return 10;
+        case ZU_STATUS_NO_FILES:
+            return 11;
         case ZU_STATUS_IO:
             return 2;
         case ZU_STATUS_OOM:
             return 5;
-        case ZU_STATUS_NO_FILES:
-            return 12;
         case ZU_STATUS_NOT_IMPLEMENTED:
             return 3;
         default:
@@ -77,7 +47,7 @@ static void emit_unzip_stub_warnings(ZContext* ctx, const char* tool_name) {
         warn_unzip_stub(ctx, tool_name, "zipinfo formatting flags", "output layout and timestamps may differ from Info-ZIP 3.0/6.0");
     }
     if (ctx->used_long_option) {
-        warn_unzip_stub(ctx, tool_name, "long options", "alias/negation coverage is incomplete; only implemented flags are wired");
+        warn_unzip_stub(ctx, tool_name, "long options", "alias/negation coverage is incomplete");
     }
 }
 
@@ -91,24 +61,57 @@ static void trace_effective_unzip_defaults(ZContext* ctx) {
     zu_trace_option(ctx, "zipinfo mode: %s (format %d)", ctx->zipinfo_mode ? "on" : "off", ctx->zi_format);
 }
 
-static void emit_option_trace(const char* tool_name, ZContext* ctx) {
-    if (!(ctx->verbose || ctx->log_info || ctx->dry_run)) {
-        return;
-    }
-    if (ctx->option_events.len == 0) {
-        return;
-    }
-    zu_log(ctx, "%s option resolution:\n", tool_name);
-    for (size_t i = 0; i < ctx->option_events.len; ++i) {
-        zu_log(ctx, "  %s\n", ctx->option_events.items[i]);
-    }
+static void print_version(FILE* to) {
+    fprintf(to, "UnZip 6.00 (zip-utils rewrite; Info-ZIP compatibility work in progress)\n");
 }
 
+static void print_usage(FILE* to, const char* argv0) {
+    const ZuCliColors* c = zu_cli_colors();
+    fprintf(to, "%sUsage:%s %s%s [options] archive.zip [patterns...]%s\n", c->bold, c->reset, c->green, argv0, c->reset);
+
+    fprintf(to, "\nInfo-ZIP compliant extraction utility.\n");
+
+    zu_cli_print_section(to, "Common Options");
+    zu_cli_print_opt(to, "-l", "List contents only");
+    zu_cli_print_opt(to, "-t", "Test archive integrity");
+    zu_cli_print_opt(to, "-p", "Extract files to pipe (stdout)");
+    zu_cli_print_opt(to, "-d <dir>", "Extract into specified directory");
+    zu_cli_print_opt(to, "-o / -n", "Overwrite / Never overwrite existing files");
+    zu_cli_print_opt(to, "-q / -qq", "Quiet mode (stackable)");
+    zu_cli_print_opt(to, "-v", "Verbose output (or print version)");
+
+    zu_cli_print_section(to, "Selection & Modifiers");
+    zu_cli_print_opt(to, "-x <pat>", "Exclude files matching pattern");
+    zu_cli_print_opt(to, "-i <pat>", "Include only files matching pattern");
+    zu_cli_print_opt(to, "-C", "Case-insensitive pattern matching");
+    zu_cli_print_opt(to, "-j", "Junk paths (flatten directories)");
+    zu_cli_print_opt(to, "-L", "Convert filenames to lowercase (stub)");
+    zu_cli_print_opt(to, "-X", "Restore UID/GID info (stub)");
+    zu_cli_print_opt(to, "-P <pass>", "Provide password");
+
+    zu_cli_print_section(to, "Zipinfo Mode (-Z)");
+    zu_cli_print_opt(to, "-1", "List filenames only (one per line)");
+    zu_cli_print_opt(to, "-2", "List filenames only (allow headers)");
+    zu_cli_print_opt(to, "-s", "Short listing (default)");
+    zu_cli_print_opt(to, "-m", "Medium listing");
+    zu_cli_print_opt(to, "-h", "Force header line");
+    zu_cli_print_opt(to, "-T", "Print decimal timestamps");
+
+    zu_cli_print_section(to, "Diagnostics");
+    zu_cli_print_opt(to, "--dry-run", "Show operations without writing");
+    zu_cli_print_opt(to, "--help", "Show this help");
+
+    fprintf(to, "\n");
+}
+
+/* --- Argument Parsing --- */
+
 static int parse_unzip_args(int argc, char** argv, ZContext* ctx) {
-    if (argv0_is_zipinfo(argv[0])) {
+    if (zu_cli_name_matches(argv[0], "zipinfo") || zu_cli_name_matches(argv[0], "ii")) {
+        g_tool_name = "zipinfo";
         ctx->zipinfo_mode = true;
         ctx->list_only = true;
-        zu_trace_option(ctx, "zipinfo mode via argv0");
+        zu_trace_option(ctx, "zipinfo mode enabled via argv0");
     }
 
     static const struct option long_opts[] = {
@@ -122,10 +125,11 @@ static int parse_unzip_args(int argc, char** argv, ZContext* ctx) {
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "lptd:ovnqvi:x:hCZ12smMvTz?P:", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "lptd:ovnqvjLi:Xx:hCZ12smMvTz?P:", long_opts, NULL)) != -1) {
         if (optind > 0 && optind <= argc && strncmp(argv[optind - 1], "--", 2) == 0) {
             ctx->used_long_option = true;
         }
+
         switch (opt) {
             case 'l':
                 if (ctx->zipinfo_mode) {
@@ -166,31 +170,42 @@ static int parse_unzip_args(int argc, char** argv, ZContext* ctx) {
                 break;
             case 'o':
                 ctx->overwrite = true;
-                zu_trace_option(ctx, "-o overwrite existing files");
+                zu_trace_option(ctx, "-o overwrite always");
                 break;
             case 'n':
                 ctx->overwrite = false;
                 zu_trace_option(ctx, "-n never overwrite");
                 break;
+            case 'j':
+                ctx->store_paths = false;
+                zu_trace_option(ctx, "-j junk paths");
+                break;
             case 'q':
                 ctx->quiet_level++;
-                ctx->quiet = ctx->quiet_level > 0;
+                ctx->quiet = true;
                 ctx->verbose = false;
                 zu_trace_option(ctx, "-q quiet level %d", ctx->quiet_level);
+                break;
+            case 'L':
+                zu_trace_option(ctx, "-L lowercase (stub)");
+                break;
+            case 'X':
+                zu_trace_option(ctx, "-X restore attrs (stub)");
                 break;
             case 'v':
                 ctx->verbose = true;
                 ctx->list_only = true;
                 /* unzip -v is effectively zipinfo -v or long format */
                 ctx->zipinfo_mode = true;
+                g_tool_name = "zipinfo";
                 ctx->zi_format = ZU_ZI_FMT_VERBOSE;
                 ctx->zi_format_specified = true;
                 ctx->zi_show_comments = true;
-                zu_trace_option(ctx, "-v verbose listing");
+                zu_trace_option(ctx, "-v verbose");
                 break;
             case 'C':
                 ctx->match_case = false;
-                zu_trace_option(ctx, "-C case-insensitive patterns");
+                zu_trace_option(ctx, "-C case-insensitive");
                 break;
             case 'i':
                 if (zu_strlist_push(&ctx->include, optarg) != 0)
@@ -202,14 +217,18 @@ static int parse_unzip_args(int argc, char** argv, ZContext* ctx) {
                     return ZU_STATUS_OOM;
                 zu_trace_option(ctx, "-x pattern %s", optarg);
                 break;
+
+            /* Zipinfo Specifics */
             case 'Z':
                 ctx->zipinfo_mode = true;
                 ctx->list_only = true;
+                g_tool_name = "zipinfo";
                 zu_trace_option(ctx, "-Z zipinfo mode");
                 break;
             case '1':
                 ctx->zipinfo_mode = true;
                 ctx->list_only = true;
+                g_tool_name = "zipinfo";
                 ctx->zi_format = ZU_ZI_FMT_NAMES;
                 ctx->zi_format_specified = true;
                 ctx->zi_header = false;
@@ -223,6 +242,7 @@ static int parse_unzip_args(int argc, char** argv, ZContext* ctx) {
             case '2':
                 ctx->zipinfo_mode = true;
                 ctx->list_only = true;
+                g_tool_name = "zipinfo";
                 ctx->zi_format = ZU_ZI_FMT_NAMES;
                 ctx->zi_format_specified = true;
                 ctx->zi_list_entries = true;
@@ -232,6 +252,7 @@ static int parse_unzip_args(int argc, char** argv, ZContext* ctx) {
             case 's':
                 ctx->zipinfo_mode = true;
                 ctx->list_only = true;
+                g_tool_name = "zipinfo";
                 ctx->zi_format = ZU_ZI_FMT_SHORT;
                 ctx->zi_format_specified = true;
                 ctx->zipinfo_stub_used = true;
@@ -240,6 +261,7 @@ static int parse_unzip_args(int argc, char** argv, ZContext* ctx) {
             case 'm':
                 ctx->zipinfo_mode = true;
                 ctx->list_only = true;
+                g_tool_name = "zipinfo";
                 ctx->zi_format = ZU_ZI_FMT_MEDIUM;
                 ctx->zi_format_specified = true;
                 ctx->zipinfo_stub_used = true;
@@ -250,6 +272,7 @@ static int parse_unzip_args(int argc, char** argv, ZContext* ctx) {
                     ctx->zi_header = true;
                     ctx->zi_header_explicit = true;
                     ctx->list_only = true;
+                    g_tool_name = "zipinfo";
                     ctx->zipinfo_stub_used = true;
                     zu_trace_option(ctx, "-h show header");
                 }
@@ -262,29 +285,32 @@ static int parse_unzip_args(int argc, char** argv, ZContext* ctx) {
                 ctx->zipinfo_mode = true;
                 ctx->zi_allow_pager = true;
                 ctx->list_only = true;
+                g_tool_name = "zipinfo";
                 ctx->zipinfo_stub_used = true;
-                zu_trace_option(ctx, "-M pager prompt (noop)");
+                zu_trace_option(ctx, "-M pager (noop)");
                 break;
             case 'T':
                 ctx->zipinfo_mode = true;
                 ctx->zi_decimal_time = true;
                 ctx->list_only = true;
+                g_tool_name = "zipinfo";
                 ctx->zipinfo_stub_used = true;
                 zu_trace_option(ctx, "-T decimal time");
                 break;
             case 'z':
                 ctx->zipinfo_mode = true;
                 ctx->list_only = true;
+                g_tool_name = "zipinfo";
                 ctx->zi_show_comments = true;
                 ctx->zipinfo_stub_used = true;
-                zu_trace_option(ctx, "-z include comments");
+                zu_trace_option(ctx, "-z show comments");
                 break;
             case OPT_DRY_RUN:
                 ctx->dry_run = true;
                 ctx->verbose = true;
                 ctx->quiet = false;
                 ctx->list_only = ctx->list_only || ctx->zipinfo_mode;
-                zu_trace_option(ctx, "--dry-run enable plan-only mode");
+                zu_trace_option(ctx, "--dry-run");
                 break;
             case '?':
                 print_usage(stdout, argv[0]);
@@ -295,19 +321,37 @@ static int parse_unzip_args(int argc, char** argv, ZContext* ctx) {
         }
     }
 
+    /* Positional Arguments */
     if (optind >= argc) {
+        // "unzip -v" or "zipinfo -v" with no args prints version
+        if (ctx->zipinfo_mode && ctx->verbose) {
+            ctx->archive_path = NULL;
+            return ZU_STATUS_OK;
+        }
         print_usage(stderr, argv[0]);
         return ZU_STATUS_USAGE;
     }
 
     ctx->archive_path = argv[optind++];
+    if (strcmp(ctx->archive_path, "-") == 0) {
+        zu_cli_error(g_tool_name, "reading archive from stdin is not fully supported in this context version");
+        return ZU_STATUS_NOT_IMPLEMENTED;
+    }
+
     zu_trace_option(ctx, "archive path set to %s", ctx->archive_path);
+
+    /* Remaining args are patterns */
     for (int i = optind; i < argc; ++i) {
         if (zu_strlist_push(&ctx->include, argv[i]) != 0)
             return ZU_STATUS_OOM;
         zu_trace_option(ctx, "include pattern %s", argv[i]);
     }
 
+    /* Re-add literal "--" if it was consumed by getopt but meant as a pattern marker for lib */
+    /* Note: getopt handles "--" by stopping, but it doesn't pass it to us easily.
+       Info-ZIP logic usually implies anything after archive is a pattern. */
+
+    /* Final Zipinfo State Logic */
     if (ctx->zipinfo_mode) {
         if (ctx->include.len > 0) {
             if (!ctx->zi_header_explicit)
@@ -331,23 +375,34 @@ static int parse_unzip_args(int argc, char** argv, ZContext* ctx) {
 }
 
 int main(int argc, char** argv) {
+    zu_cli_init_terminal();
     ZContext* ctx = zu_context_create();
     if (!ctx) {
-        fprintf(stderr, "unzip: failed to allocate context\n");
+        zu_cli_error(g_tool_name, "failed to allocate context");
         return ZU_STATUS_OOM;
     }
 
     int parse_rc = parse_unzip_args(argc, argv, ctx);
+
     if (parse_rc == ZU_STATUS_USAGE) {
         zu_context_free(ctx);
-        return 0;
+        return map_exit_code(parse_rc);
     }
     if (parse_rc != ZU_STATUS_OK) {
-        fprintf(stderr, "unzip: argument parsing failed (%s)\n", zu_status_str(parse_rc));
+        if (parse_rc != ZU_STATUS_USAGE)
+            zu_cli_error(g_tool_name, "argument parsing failed: %s", zu_status_str(parse_rc));
         zu_context_free(ctx);
         return map_exit_code(parse_rc);
     }
 
+    /* Version check mode */
+    if (!ctx->archive_path && ctx->zipinfo_mode && ctx->verbose) {
+        print_version(stdout);
+        zu_context_free(ctx);
+        return 0;
+    }
+
+    /* Dry Run Logic overrides */
     if (ctx->dry_run && !ctx->list_only && !ctx->test_integrity) {
         ctx->list_only = true;
     }
@@ -357,14 +412,17 @@ int main(int argc, char** argv) {
     }
 
     const char* tool_name = ctx->zipinfo_mode ? "zipinfo" : "unzip";
+    g_tool_name = tool_name;
     emit_unzip_stub_warnings(ctx, tool_name);
     trace_effective_unzip_defaults(ctx);
-    emit_option_trace(tool_name, ctx);
+    zu_cli_emit_option_trace(tool_name, ctx);
 
     int exec_rc = zu_unzip_run(ctx);
+
     if (exec_rc != ZU_STATUS_OK && ctx->error_msg[0] != '\0') {
-        fprintf(stderr, "unzip: %s\n", ctx->error_msg);
+        zu_cli_error(g_tool_name, "%s", ctx->error_msg);
     }
+
     zu_context_free(ctx);
     return map_exit_code(exec_rc);
 }

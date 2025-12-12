@@ -4,7 +4,7 @@
 
 This specification defines the Unix/Linux behavior for `zip` in `zip-utils`
 
-* Linux-only semantics
+* Unix/Linux-only semantics
 * No split archive support
 * Supported archive format: standard ZIP with Store and Deflate methods
 * Observable behavior goal: match Info-ZIP for the supported option set (exit codes, stdout/stderr shape, side effects)
