@@ -54,11 +54,15 @@ def main():
             if skip.name in names or keep.name not in names:
                 raise SystemExit("exclude list was not honored")
 
-        # Reject clustered list-taking options.
+        # Clustered -xpattern form should be accepted and skip matching names.
         archive3 = work / "badcluster.zip"
-        res3 = run([zip_bin, "-xskip.txt", str(archive3), keep.name], cwd=work)
-        if res3.returncode == 0:
-            raise SystemExit("clustered -x should fail but succeeded")
+        res3 = run([zip_bin, str(archive3), keep.name, skip.name, "-xskip.txt"], cwd=work)
+        if res3.returncode != 0:
+            raise SystemExit(f"clustered -xparse failed: {res3.stderr.decode() or res3.stdout.decode()}")
+        with zipfile.ZipFile(archive3, "r") as zf:
+            names = zf.namelist()
+            if skip.name in names or keep.name not in names:
+                raise SystemExit("clustered -x did not apply exclusion")
 
         # Reject the undocumented -xi combined token.
         archive4 = work / "badxi.zip"

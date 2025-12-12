@@ -9,6 +9,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -92,12 +94,233 @@ static bool path_is_stdin(const char* path) {
     return path && strcmp(path, "-") == 0;
 }
 
+static bool should_store_by_suffix(const ZContext* ctx, const char* path) {
+    if (!ctx || ctx->no_compress_suffixes.len == 0 || !path) {
+        return false;
+    }
+    const char* dot = strrchr(path, '.');
+    if (!dot || *(dot + 1) == '\0') {
+        return false;
+    }
+    const char* ext = dot + 1;
+    for (size_t i = 0; i < ctx->no_compress_suffixes.len; ++i) {
+        const char* suf = ctx->no_compress_suffixes.items[i];
+        if (!suf || *suf == '\0')
+            continue;
+        const char* cmp = suf;
+        if (*cmp == '.')
+            cmp++;
+        if (strcasecmp(ext, cmp) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static const char* basename_component(const char* path) {
     const char* slash = strrchr(path, '/');
     if (slash && slash[1] != '\0') {
         return slash + 1;
     }
     return path;
+}
+
+static int translate_buffer(ZContext* ctx, const uint8_t* in, size_t in_len, uint8_t** out_buf, size_t* out_len, bool* prev_cr) {
+    if (!ctx || ctx->line_mode == ZU_LINE_NONE) {
+        *out_buf = (uint8_t*)in;
+        *out_len = in_len;
+        return ZU_STATUS_OK;
+    }
+
+    size_t cap = ctx->line_mode == ZU_LINE_LF_TO_CRLF ? (in_len * 2 + 1) : (in_len + 1);
+    uint8_t* out = malloc(cap);
+    if (!out)
+        return ZU_STATUS_OOM;
+
+    size_t o = 0;
+    for (size_t i = 0; i < in_len; ++i) {
+        uint8_t b = in[i];
+        if (ctx->line_mode == ZU_LINE_LF_TO_CRLF) {
+            if (b == '\n' && !*prev_cr) {
+                out[o++] = '\r';
+                out[o++] = '\n';
+            }
+            else {
+                out[o++] = b;
+            }
+            *prev_cr = (b == '\r');
+        }
+        else { /* CRLF_TO_LF */
+            if (*prev_cr) {
+                if (b == '\n') {
+                    out[o++] = '\n';
+                    *prev_cr = false;
+                    continue;
+                }
+                out[o++] = '\r';
+                *prev_cr = false;
+            }
+            if (b == '\r') {
+                *prev_cr = true;
+                continue;
+            }
+            out[o++] = b;
+        }
+    }
+    if (ctx->line_mode == ZU_LINE_CRLF_TO_LF && *prev_cr) {
+        out[o++] = '\r';
+        *prev_cr = false;
+    }
+
+    *out_buf = out;
+    *out_len = o;
+    return ZU_STATUS_OK;
+}
+
+static char* make_temp_path(const ZContext* ctx, const char* target_path) {
+    const char* base = basename_component(target_path);
+    const char* dir_sep = strrchr(target_path, '/');
+    char dirbuf[PATH_MAX];
+    const char* dir = ".";
+    if (ctx->temp_dir) {
+        dir = ctx->temp_dir;
+    }
+    else if (dir_sep) {
+        size_t len = (size_t)(dir_sep - target_path);
+        if (len >= sizeof(dirbuf))
+            len = sizeof(dirbuf) - 1;
+        memcpy(dirbuf, target_path, len);
+        dirbuf[len] = '\0';
+        dir = dirbuf;
+    }
+
+    size_t len = strlen(dir) + strlen(base) + 6 + 3; /* / + .tmp + nul */
+    char* path = malloc(len);
+    if (!path)
+        return NULL;
+    snprintf(path, len, "%s/%s.tmp", dir, base);
+    return path;
+}
+
+static int stage_translated(ZContext* ctx, const char* path, bool is_stdin, FILE** out_fp, char** out_path, uint32_t* crc_out, uint64_t* size_out) {
+    char* tpath = make_temp_path(ctx, path ? path : "stdin");
+    if (!tpath)
+        return ZU_STATUS_OOM;
+    int fd = mkstemp(tpath);
+    if (fd < 0) {
+        free(tpath);
+        return ZU_STATUS_IO;
+    }
+    FILE* fp = fdopen(fd, "wb+");
+    if (!fp) {
+        close(fd);
+        unlink(tpath);
+        free(tpath);
+        return ZU_STATUS_IO;
+    }
+
+    FILE* src = is_stdin ? stdin : fopen(path, "rb");
+    if (!src) {
+        fclose(fp);
+        unlink(tpath);
+        free(tpath);
+        return ZU_STATUS_IO;
+    }
+
+    uint8_t* buf = malloc(ZU_IO_CHUNK);
+    if (!buf) {
+        if (!is_stdin)
+            fclose(src);
+        fclose(fp);
+        unlink(tpath);
+        free(tpath);
+        return ZU_STATUS_OOM;
+    }
+
+    uint32_t crc = 0;
+    uint64_t total = 0;
+    bool prev_cr = false;
+    int rc = ZU_STATUS_OK;
+    size_t got;
+    while ((got = fread(buf, 1, ZU_IO_CHUNK, src)) > 0) {
+        uint8_t* out = NULL;
+        size_t out_len = 0;
+        rc = translate_buffer(ctx, buf, got, &out, &out_len, &prev_cr);
+        if (rc != ZU_STATUS_OK)
+            break;
+        crc = zu_crc32(out, out_len, crc);
+        total += out_len;
+        if (fwrite(out, 1, out_len, fp) != out_len) {
+            rc = ZU_STATUS_IO;
+        }
+        if (out != buf)
+            free(out);
+        if (rc != ZU_STATUS_OK)
+            break;
+    }
+    if (rc == ZU_STATUS_OK && ferror(src)) {
+        rc = ZU_STATUS_IO;
+    }
+    free(buf);
+    if (!is_stdin)
+        fclose(src);
+
+    if (rc != ZU_STATUS_OK) {
+        fclose(fp);
+        unlink(tpath);
+        free(tpath);
+        return rc;
+    }
+
+    if (fseeko(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        unlink(tpath);
+        free(tpath);
+        return ZU_STATUS_IO;
+    }
+
+    *out_fp = fp;
+    *out_path = tpath;
+    if (crc_out)
+        *crc_out = crc;
+    if (size_out)
+        *size_out = total;
+    return ZU_STATUS_OK;
+}
+
+static int rename_or_copy(const char* src, const char* dst) {
+    if (rename(src, dst) == 0) {
+        return 0;
+    }
+    if (errno != EXDEV) {
+        return -1;
+    }
+
+    FILE* in = fopen(src, "rb");
+    FILE* out = fopen(dst, "wb");
+    if (!in || !out) {
+        if (in)
+            fclose(in);
+        if (out)
+            fclose(out);
+        return -1;
+    }
+    uint8_t buf[8192];
+    size_t got;
+    int rc = 0;
+    while ((got = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, got, out) != got) {
+            rc = -1;
+            break;
+        }
+    }
+    if (ferror(in) || ferror(out))
+        rc = -1;
+    fclose(in);
+    fclose(out);
+    if (rc == 0)
+        unlink(src);
+    return rc;
 }
 
 static void msdos_datetime(const struct stat* st, uint16_t* out_time, uint16_t* out_date) {
@@ -623,6 +846,9 @@ static int write_streaming_entry(ZContext* ctx,
     }
 
     bool compress = ctx->compression_level > 0 && ctx->compression_method != 0;
+    if (should_store_by_suffix(ctx, path)) {
+        compress = false;
+    }
     if (info->size_known && info->st.st_size == 0) {
         compress = false;
     }
@@ -1221,10 +1447,10 @@ int zu_modify_archive(ZContext* ctx) {
         ctx->out_file = stdout;
     }
     else {
-        /* Create temp file next to target path */
-        int len = strlen(target_path) + 10;
-        temp_path = malloc(len);
-        snprintf(temp_path, len, "%s.tmp", target_path);
+        temp_path = make_temp_path(ctx, target_path);
+        if (!temp_path) {
+            return ZU_STATUS_OOM;
+        }
 
         ctx->temp_write_path = temp_path;  // Store for split logic
 
@@ -1250,6 +1476,7 @@ int zu_modify_archive(ZContext* ctx) {
     uint64_t offset = 0;
     int rc = ZU_STATUS_OK;
     size_t added = 0;
+    char* staged_path_global = NULL;
     uint64_t zip64_trigger = zip64_trigger_bytes();
 
     /* 4. Write Entries */
@@ -1364,18 +1591,16 @@ int zu_modify_archive(ZContext* ctx) {
             msdos_datetime(&info.st, &dos_time, &dos_date);
 
             bool streaming = info.is_stdin || !info.size_known;
+            bool needs_translation = ctx->line_mode != ZU_LINE_NONE;
+            if (needs_translation && streaming) {
+                streaming = false; /* stage for translation */
+            }
             if (streaming) {
                 rc = write_streaming_entry(ctx, path, entry_name, &info, dos_time, dos_date, zip64_trigger, &offset, &entries);
                 if (rc != ZU_STATUS_OK)
                     goto cleanup;
                 if (ctx->remove_source && !info.is_stdin) {
-                    if (unlink(path) != 0) {
-                        char msg[128];
-                        snprintf(msg, sizeof(msg), "remove '%s' failed: %s", path, strerror(errno));
-                        zu_context_set_error(ctx, ZU_STATUS_IO, msg);
-                        rc = ZU_STATUS_IO;
-                        goto cleanup;
-                    }
+                    unlink(path);
                 }
                 free(allocated);
                 continue;
@@ -1385,6 +1610,7 @@ int zu_modify_archive(ZContext* ctx) {
             uint64_t uncomp_size = 0, comp_size = 0;
             uint16_t method = 0, flags = 0;
             FILE* staged = NULL;
+            char* staged_path = NULL;
 
             if (S_ISDIR(info.st.st_mode)) {
                 /* Directories have zero size, no CRC, store method */
@@ -1397,6 +1623,9 @@ int zu_modify_archive(ZContext* ctx) {
                 bool compress = ctx->compression_level > 0;
                 if (info.st.st_size == 0)
                     compress = false;
+                if (should_store_by_suffix(ctx, path)) {
+                    compress = false;
+                }
 
                 if (compress) {
                     method = ctx->compression_method;
@@ -1408,17 +1637,45 @@ int zu_modify_archive(ZContext* ctx) {
                     method = 0;
                 }
 
-                if (compress) {
-                    rc = compress_to_temp(ctx, path, method, ctx->compression_level, &staged, &crc, &uncomp_size, &comp_size);
+                if (needs_translation) {
+                    FILE* trans_fp = NULL;
+                    rc = stage_translated(ctx, path, info.is_stdin, &trans_fp, &staged_path, &crc, &uncomp_size);
+                    if (rc != ZU_STATUS_OK) {
+                        goto cleanup;
+                    }
+                    staged = trans_fp;
+                    staged_path_global = staged_path;
+                    info.size_known = true;
+                    comp_size = uncomp_size;
+
+                    if (compress) {
+                        FILE* staged_comp = NULL;
+                        uint32_t ccrc = 0;
+                        uint64_t cuncomp = 0, ccomp = 0;
+                        rc = compress_to_temp(ctx, staged_path, method, ctx->compression_level, &staged_comp, &ccrc, &cuncomp, &ccomp);
+                        fclose(staged);
+                        staged = staged_comp;
+                        comp_size = ccomp;
+                        uncomp_size = cuncomp;
+                        crc = ccrc;
+                        if (rc != ZU_STATUS_OK) {
+                            goto cleanup;
+                        }
+                    }
                 }
                 else {
-                    rc = compute_crc_and_size(ctx, path, &crc, &uncomp_size);
-                    comp_size = uncomp_size;
-                }
-                if (rc != ZU_STATUS_OK) {
-                    if (staged)
-                        fclose(staged);
-                    goto cleanup;
+                    if (compress) {
+                        rc = compress_to_temp(ctx, path, method, ctx->compression_level, &staged, &crc, &uncomp_size, &comp_size);
+                    }
+                    else {
+                        rc = compute_crc_and_size(ctx, path, &crc, &uncomp_size);
+                        comp_size = uncomp_size;
+                    }
+                    if (rc != ZU_STATUS_OK) {
+                        if (staged)
+                            fclose(staged);
+                        goto cleanup;
+                    }
                 }
             }
 
@@ -1511,6 +1768,14 @@ int zu_modify_archive(ZContext* ctx) {
                 if (staged)
                     fclose(staged);
             }
+            if (ctx->remove_source && !info.is_stdin) {
+                unlink(path);
+            }
+            if (staged_path_global) {
+                unlink(staged_path_global);
+                free(staged_path_global);
+                staged_path_global = NULL;
+            }
 
             if (ensure_entry_capacity(&entries) != ZU_STATUS_OK) {
                 rc = ZU_STATUS_OOM;
@@ -1543,16 +1808,6 @@ int zu_modify_archive(ZContext* ctx) {
 
             offset += sizeof(lho) + name_len + extra_len + comp_size;
 
-            if (ctx->remove_source && !info.is_stdin) {
-                if (unlink(path) != 0) {
-                    char msg[128];
-                    snprintf(msg, sizeof(msg), "remove '%s' failed: %s", path, strerror(errno));
-                    free(allocated);
-                    zu_context_set_error(ctx, ZU_STATUS_IO, msg);
-                    rc = ZU_STATUS_IO;
-                    goto cleanup;
-                }
-            }
             free(allocated);
         }
     }
@@ -1648,6 +1903,11 @@ int zu_modify_archive(ZContext* ctx) {
     }
 
 cleanup:
+    if (staged_path_global) {
+        unlink(staged_path_global);
+        free(staged_path_global);
+        staged_path_global = NULL;
+    }
     free_entries(&entries);
     if (ctx->out_file && ctx->out_file != stdout)
         fclose(ctx->out_file);
@@ -1664,23 +1924,15 @@ cleanup:
                 char* old_name = get_split_path(temp_path, i);
                 char* new_name = NULL;
                 if (i == ctx->split_disk_index) {
-                    /* Last file is .zip */
                     new_name = strdup(target_path);
                 }
                 else {
-                    /* Others are .zXX */
-                    /* We need to pass TARGET path to get_split_path, but append .tmp logic? */
-                    /* get_split_path appends .zXX. */
-                    /* But here we want the final name, so no .tmp */
-                    /* Wait, get_split_path handles .tmp if present in base. */
-                    /* Here base is target_path (no .tmp). */
                     new_name = get_split_path(target_path, i);
                 }
 
-                if (rename(old_name, new_name) != 0) {
+                if (rename_or_copy(old_name, new_name) != 0) {
                     zu_context_set_error(ctx, ZU_STATUS_IO, "rename split part failed");
                     rc = ZU_STATUS_IO;
-                    // Try to continue? No.
                     free(old_name);
                     free(new_name);
                     break;
@@ -1690,7 +1942,7 @@ cleanup:
             }
         }
         else {
-            if (rename(temp_path, target_path) != 0) {
+            if (rename_or_copy(temp_path, target_path) != 0) {
                 zu_context_set_error(ctx, ZU_STATUS_IO, "rename temp file failed");
                 rc = ZU_STATUS_IO;
             }

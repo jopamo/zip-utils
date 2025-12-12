@@ -93,6 +93,7 @@ struct ZContext {
     bool sort_entries;            // Whether to sort entries in the central directory
 
     /* Output/Logging */
+    char* temp_dir;          /* -b */
     const char* output_path; /* -O */
     char* log_path;          /* -lf */
     bool log_append;         /* -la */
@@ -104,6 +105,12 @@ struct ZContext {
     bool has_filter_after;
     time_t filter_before; /* -tt */
     bool has_filter_before;
+    enum {
+        ZU_LINE_NONE = 0,
+        ZU_LINE_LF_TO_CRLF,
+        ZU_LINE_CRLF_TO_LF,
+    } line_mode;                     /* -l / -ll */
+    ZU_StrList no_compress_suffixes; /* -n */
 
     /* Encryption */
     bool encrypt;

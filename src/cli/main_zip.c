@@ -453,16 +453,17 @@ static void print_usage(FILE* to, const char* argv0) {
             "  Update:     -u update newer, -f freshen, -m move, -d delete patterns, -FS filesync\n"
             "  Select:     -x patterns..., -i patterns... (lists end at next option/--)\n"
             "  Dates:      -t mmddyyyy (after), -tt mmddyyyy (before)\n"
-            "  Compress:   -0..-9 level, -Z method (deflate/store/bzip2)\n"
-            "  Output:     -O path (write elsewhere), \"-\" for stdout\n"
+            "  Compress:   -0..-9 level, -Z method (deflate/store/bzip2), -n suffixes store-only\n"
+            "  Output:     -O path (write elsewhere), -b dir (temp dir), \"-\" for stdout\n"
             "  Split:      -s size[kmgt], -sp pause between parts\n"
             "  Logging:    -lf file, -la append, -li info-level\n"
+            "  Text:       -l LF->CRLF, -ll CRLF->LF\n"
             "  Quiet/Verb: -q (stackable) / -v, -T test after write\n"
             "  Fix:        -F / -FF\n"
             "  Encrypt:    -e, -P password\n"
             "  Comments:   -z (zipfile comment from stdin)\n"
             "  Zipnote:    -w (when invoked as zipnote)\n"
-            "  Not yet:    -b -c -o -n -D -X -y -A -J -l -ll\n"
+            "  Not yet:    -c -o -D -X -y -A -J\n"
             "  --help      Show this help\n",
             argv0);
 }
@@ -534,8 +535,8 @@ static int apply_cluster_flag(char c, ZContext* ctx) {
             ctx->encrypt = true;
             return ZU_STATUS_OK;
         case 'l':
-            fprintf(stderr, "zip: -l (convert LF to CR LF) not supported in this version\n");
-            return ZU_STATUS_NOT_IMPLEMENTED;
+            ctx->line_mode = ZU_LINE_LF_TO_CRLF;
+            return ZU_STATUS_OK;
         default:
             break;
     }
@@ -578,6 +579,66 @@ static int parse_pattern_list(ZContext* ctx, int argc, char** argv, int* idx, bo
         return ZU_STATUS_USAGE;
     }
 
+    *idx = i - 1;
+    return ZU_STATUS_OK;
+}
+
+static int parse_pattern_list_with_first(ZContext* ctx, const char* first, int argc, char** argv, int* idx, bool* endopts, bool include) {
+    if (first) {
+        if (include) {
+            if (zu_strlist_push(&ctx->include_patterns, first) != 0)
+                return ZU_STATUS_OOM;
+        }
+        else {
+            if (zu_strlist_push(&ctx->exclude, first) != 0)
+                return ZU_STATUS_OOM;
+        }
+        return ZU_STATUS_OK;
+    }
+    return parse_pattern_list(ctx, argc, argv, idx, endopts, include);
+}
+
+static int push_suffixes(ZContext* ctx, const char* str) {
+    if (!str || !*str)
+        return ZU_STATUS_OK;
+    const char* p = str;
+    while (*p) {
+        const char* start = p;
+        while (*p && *p != ':')
+            p++;
+        size_t len = (size_t)(p - start);
+        char* suf = strndup(start, len);
+        if (!suf)
+            return ZU_STATUS_OOM;
+        if (zu_strlist_push(&ctx->no_compress_suffixes, suf) != 0) {
+            free(suf);
+            return ZU_STATUS_OOM;
+        }
+        p += (*p == ':') ? 1 : 0;
+    }
+    return ZU_STATUS_OK;
+}
+
+static int parse_suffix_list(ZContext* ctx, const char* first, int argc, char** argv, int* idx, bool* endopts) {
+    int rc = push_suffixes(ctx, first);
+    if (rc != ZU_STATUS_OK)
+        return rc;
+
+    int i = *idx + 1;
+    for (; i < argc; ++i) {
+        const char* tok = argv[i];
+        if (!*endopts && strcmp(tok, "--") == 0) {
+            *endopts = true;
+            ++i;
+            break;
+        }
+        if (!*endopts && tok[0] == '-' && tok[1] != '\0') {
+            break;
+        }
+        rc = push_suffixes(ctx, tok);
+        if (rc != ZU_STATUS_OK)
+            return rc;
+    }
     *idx = i - 1;
     return ZU_STATUS_OK;
 }
@@ -717,8 +778,8 @@ static int parse_long_option(const char* tok, int argc, char** argv, int* idx, Z
         return ZU_STATUS_OK;
     }
     if (strcmp(name, "ll") == 0) {
-        fprintf(stderr, "zip: -ll (convert CR LF to LF) not supported in this version\n");
-        return ZU_STATUS_NOT_IMPLEMENTED;
+        ctx->line_mode = ZU_LINE_CRLF_TO_LF;
+        return ZU_STATUS_OK;
     }
 
     print_usage(stderr, argv[0]);
@@ -754,8 +815,9 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                 continue;
             }
             if (strcmp(tok, "-ll") == 0) {
-                fprintf(stderr, "zip: -ll (convert CR LF to LF) not supported in this version\n");
-                return ZU_STATUS_NOT_IMPLEMENTED;
+                ctx->line_mode = ZU_LINE_CRLF_TO_LF;
+                ++i;
+                continue;
             }
             if (strcmp(tok, "-w") == 0) {
                 if (!is_zipnote) {
@@ -840,8 +902,11 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
 
                 switch (first) {
                     case 'b':
-                        fprintf(stderr, "zip: -b (temp file path) not supported in this version\n");
-                        return ZU_STATUS_NOT_IMPLEMENTED;
+                        free(ctx->temp_dir);
+                        ctx->temp_dir = strdup(arg);
+                        if (!ctx->temp_dir)
+                            return ZU_STATUS_OOM;
+                        break;
                     case 't':
                         ctx->filter_after = parse_date(arg);
                         if (ctx->filter_after == (time_t)-1) {
@@ -886,13 +951,20 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                 continue;
             }
 
-            if ((first == 'x' || first == 'i' || first == 'n' || first == '@' || first == 'F' || first == 'z' || first == 'c' || first == 'o' || first == 'A' || first == 'J') && rest[0] != '\0') {
+            if ((first == '@' || first == 'F' || first == 'z' || first == 'c' || first == 'o' || first == 'A' || first == 'J') && rest[0] != '\0') {
                 fprintf(stderr, "zip: option '%c' must be separate (not clustered)\n", first);
                 return ZU_STATUS_USAGE;
             }
 
             if (strcmp(tok, "-x") == 0) {
                 int rc = parse_pattern_list(ctx, argc, argv, &i, &endopts, false);
+                if (rc != ZU_STATUS_OK)
+                    return rc;
+                ++i;
+                continue;
+            }
+            if (first == 'x' && rest[0] != '\0') {
+                int rc = parse_pattern_list_with_first(ctx, rest, argc, argv, &i, &endopts, false);
                 if (rc != ZU_STATUS_OK)
                     return rc;
                 ++i;
@@ -905,9 +977,26 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                 ++i;
                 continue;
             }
+            if (first == 'i' && rest[0] != '\0') {
+                int rc = parse_pattern_list_with_first(ctx, rest, argc, argv, &i, &endopts, true);
+                if (rc != ZU_STATUS_OK)
+                    return rc;
+                ++i;
+                continue;
+            }
             if (strcmp(tok, "-n") == 0) {
-                fprintf(stderr, "zip: -n (don't compress suffixes) not supported in this version\n");
-                return ZU_STATUS_NOT_IMPLEMENTED;
+                int rc = parse_suffix_list(ctx, NULL, argc, argv, &i, &endopts);
+                if (rc != ZU_STATUS_OK)
+                    return rc;
+                ++i;
+                continue;
+            }
+            if (first == 'n' && rest[0] != '\0') {
+                int rc = parse_suffix_list(ctx, rest, argc, argv, &i, &endopts);
+                if (rc != ZU_STATUS_OK)
+                    return rc;
+                ++i;
+                continue;
             }
             if (strcmp(tok, "-@") == 0) {
                 int rc = read_stdin_names(ctx);

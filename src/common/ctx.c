@@ -43,11 +43,13 @@ ZContext* zu_context_create(void) {
     ctx->log_info = false;
     ctx->has_filter_after = false;
     ctx->has_filter_before = false;
+    ctx->line_mode = ZU_LINE_NONE;
 
     zu_strlist_init(&ctx->include);
     zu_strlist_init(&ctx->include_patterns);
     zu_strlist_init(&ctx->exclude);
     zu_strlist_init(&ctx->existing_entries);
+    zu_strlist_init(&ctx->no_compress_suffixes);
 
     return ctx;
 }
@@ -77,10 +79,12 @@ void zu_context_free(ZContext* ctx) {
     zu_strlist_free(&ctx->include);
     zu_strlist_free(&ctx->include_patterns);
     zu_strlist_free(&ctx->exclude);
+    zu_strlist_free(&ctx->no_compress_suffixes);
     zu_strlist_free_with_dtor(&ctx->existing_entries, zu_existing_entry_free);
     free(ctx->io_buffer);
     free(ctx->zip_comment);
     free(ctx->temp_read_path);
+    free(ctx->temp_dir);
     free(ctx->password);
     free(ctx);
 }

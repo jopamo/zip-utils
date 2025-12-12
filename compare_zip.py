@@ -60,6 +60,7 @@ from pathlib import Path
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Any, Optional, Tuple
 import shutil
+import zipfile
 
 @dataclass
 class TestResult:
@@ -233,6 +234,25 @@ class ZipComparator:
             differences.append(f"Archive validity differs: system={sys_valid}, build={build_valid}")
             passed = False
 
+        # If both succeeded, compare archive contents
+        if sys_code == 0 and build_code == 0:
+            try:
+                with zipfile.ZipFile(archive_system, 'r') as zs, zipfile.ZipFile(archive_build, 'r') as zb:
+                    sys_names = sorted(zs.namelist())
+                    build_names = sorted(zb.namelist())
+                    if sys_names != build_names:
+                        differences.append(f"Archive entries differ: system={sys_names}, build={build_names}")
+                        passed = False
+                    else:
+                        for name in sys_names:
+                            if zs.read(name) != zb.read(name):
+                                differences.append(f"Entry content differs for {name}")
+                                passed = False
+                                break
+            except Exception as exc:  # pragma: no cover - safety net
+                differences.append(f"Archive compare failed: {exc}")
+                passed = False
+
         # Compare archive sizes (only if both succeeded)
         if sys_code == 0 and build_code == 0 and sys_size != build_size:
             differences.append(f"Archive sizes differ: system={sys_size}, build={build_size}")
@@ -276,6 +296,7 @@ class ZipComparator:
                 ("compress_fast", ["-1"]),
                 ("compress_best", ["-9"]),
                 ("quiet", ["-q"]),
+                ("quiet_really", ["-qq"]),
                 ("verbose", ["-v"]),
                 ("exclude", ["-x", "*.bin"]),
                 ("include", ["-i", "*.txt"]),
@@ -287,6 +308,7 @@ class ZipComparator:
                 #("encrypt", ["-e", "-P", "testpass"]),
                 ("split", ["-s", "100k"]),
                 ("time_filter", ["-t", "20250101"]),
+                ("time_filter_before", ["-tt", "20240101"]),
             ]
 
             for name, args in test_cases:
