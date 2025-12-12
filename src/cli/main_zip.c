@@ -620,27 +620,15 @@ static int push_suffixes(ZContext* ctx, const char* str) {
 }
 
 static int parse_suffix_list(ZContext* ctx, const char* first, int argc, char** argv, int* idx, bool* endopts) {
-    int rc = push_suffixes(ctx, first);
-    if (rc != ZU_STATUS_OK)
-        return rc;
-
-    int i = *idx + 1;
-    for (; i < argc; ++i) {
-        const char* tok = argv[i];
-        if (!*endopts && strcmp(tok, "--") == 0) {
-            *endopts = true;
-            ++i;
-            break;
-        }
-        if (!*endopts && tok[0] == '-' && tok[1] != '\0') {
-            break;
-        }
-        rc = push_suffixes(ctx, tok);
-        if (rc != ZU_STATUS_OK)
-            return rc;
+    if (first) {
+        return push_suffixes(ctx, first);
     }
-    *idx = i - 1;
-    return ZU_STATUS_OK;
+    if (*idx + 1 >= argc) {
+        fprintf(stderr, "zip: -n requires suffix list\n");
+        return ZU_STATUS_USAGE;
+    }
+    const char* tok = argv[++(*idx)];
+    return push_suffixes(ctx, tok);
 }
 
 static int parse_long_option(const char* tok, int argc, char** argv, int* idx, ZContext* ctx) {

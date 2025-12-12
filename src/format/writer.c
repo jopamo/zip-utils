@@ -202,92 +202,6 @@ static char* make_temp_path(const ZContext* ctx, const char* target_path) {
     return path;
 }
 
-static int stage_translated(ZContext* ctx, const char* path, bool is_stdin, FILE** out_fp, char** out_path, uint32_t* crc_out, uint64_t* size_out) {
-    char* tpath = make_temp_path(ctx, path ? path : "stdin");
-    if (!tpath)
-        return ZU_STATUS_OOM;
-    int fd = mkstemp(tpath);
-    if (fd < 0) {
-        free(tpath);
-        return ZU_STATUS_IO;
-    }
-    FILE* fp = fdopen(fd, "wb+");
-    if (!fp) {
-        close(fd);
-        unlink(tpath);
-        free(tpath);
-        return ZU_STATUS_IO;
-    }
-
-    FILE* src = is_stdin ? stdin : fopen(path, "rb");
-    if (!src) {
-        fclose(fp);
-        unlink(tpath);
-        free(tpath);
-        return ZU_STATUS_IO;
-    }
-
-    uint8_t* buf = malloc(ZU_IO_CHUNK);
-    if (!buf) {
-        if (!is_stdin)
-            fclose(src);
-        fclose(fp);
-        unlink(tpath);
-        free(tpath);
-        return ZU_STATUS_OOM;
-    }
-
-    uint32_t crc = 0;
-    uint64_t total = 0;
-    bool prev_cr = false;
-    int rc = ZU_STATUS_OK;
-    size_t got;
-    while ((got = fread(buf, 1, ZU_IO_CHUNK, src)) > 0) {
-        uint8_t* out = NULL;
-        size_t out_len = 0;
-        rc = translate_buffer(ctx, buf, got, &out, &out_len, &prev_cr);
-        if (rc != ZU_STATUS_OK)
-            break;
-        crc = zu_crc32(out, out_len, crc);
-        total += out_len;
-        if (fwrite(out, 1, out_len, fp) != out_len) {
-            rc = ZU_STATUS_IO;
-        }
-        if (out != buf)
-            free(out);
-        if (rc != ZU_STATUS_OK)
-            break;
-    }
-    if (rc == ZU_STATUS_OK && ferror(src)) {
-        rc = ZU_STATUS_IO;
-    }
-    free(buf);
-    if (!is_stdin)
-        fclose(src);
-
-    if (rc != ZU_STATUS_OK) {
-        fclose(fp);
-        unlink(tpath);
-        free(tpath);
-        return rc;
-    }
-
-    if (fseeko(fp, 0, SEEK_SET) != 0) {
-        fclose(fp);
-        unlink(tpath);
-        free(tpath);
-        return ZU_STATUS_IO;
-    }
-
-    *out_fp = fp;
-    *out_path = tpath;
-    if (crc_out)
-        *crc_out = crc;
-    if (size_out)
-        *size_out = total;
-    return ZU_STATUS_OK;
-}
-
 static int rename_or_copy(const char* src, const char* dst) {
     if (rename(src, dst) == 0) {
         return 0;
@@ -846,6 +760,9 @@ static int write_streaming_entry(ZContext* ctx,
     }
 
     bool compress = ctx->compression_level > 0 && ctx->compression_method != 0;
+    if (ctx->line_mode != ZU_LINE_NONE) {
+        compress = false; /* Info-ZIP stores when doing line translation */
+    }
     if (should_store_by_suffix(ctx, path)) {
         compress = false;
     }
@@ -937,20 +854,31 @@ static int write_streaming_entry(ZContext* ctx,
     }
 
     int rc = ZU_STATUS_OK;
+    bool prev_cr = false;
     if (!compress) {
         size_t got = 0;
         while ((got = fread(inbuf, 1, ZU_IO_CHUNK, src)) > 0) {
-            crc = zu_crc32(inbuf, got, crc);
-            uncomp_size += got;
-            if (pzc) {
-                zu_zipcrypto_encrypt(pzc, inbuf, got);
+            uint8_t* translated = inbuf;
+            size_t translated_len = got;
+            if (ctx->line_mode != ZU_LINE_NONE) {
+                rc = translate_buffer(ctx, inbuf, got, &translated, &translated_len, &prev_cr);
+                if (rc != ZU_STATUS_OK)
+                    break;
             }
-            if (zu_write_output(ctx, inbuf, got) != ZU_STATUS_OK) {
+            crc = zu_crc32(translated, translated_len, crc);
+            uncomp_size += translated_len;
+            if (pzc) {
+                zu_zipcrypto_encrypt(pzc, translated, translated_len);
+            }
+            if (zu_write_output(ctx, translated, translated_len) != ZU_STATUS_OK) {
                 rc = ZU_STATUS_IO;
                 zu_context_set_error(ctx, rc, "write output failed");
-                break;
             }
-            comp_size += got;
+            if (translated != inbuf)
+                free(translated);
+            if (rc != ZU_STATUS_OK)
+                break;
+            comp_size += translated_len;
         }
         if (rc == ZU_STATUS_OK && ferror(src)) {
             rc = ZU_STATUS_IO;
@@ -969,10 +897,17 @@ static int write_streaming_entry(ZContext* ctx,
         else {
             size_t got = 0;
             while ((got = fread(inbuf, 1, ZU_IO_CHUNK, src)) > 0) {
-                crc = zu_crc32(inbuf, got, crc);
-                uncomp_size += got;
-                strm.next_in = inbuf;
-                strm.avail_in = (uInt)got;
+                uint8_t* translated = inbuf;
+                size_t translated_len = got;
+                if (ctx->line_mode != ZU_LINE_NONE) {
+                    rc = translate_buffer(ctx, inbuf, got, &translated, &translated_len, &prev_cr);
+                    if (rc != ZU_STATUS_OK)
+                        break;
+                }
+                crc = zu_crc32(translated, translated_len, crc);
+                uncomp_size += translated_len;
+                strm.next_in = translated;
+                strm.avail_in = (uInt)translated_len;
                 do {
                     strm.next_out = outbuf;
                     strm.avail_out = (uInt)ZU_IO_CHUNK;
@@ -995,6 +930,8 @@ static int write_streaming_entry(ZContext* ctx,
                         comp_size += have;
                     }
                 } while (strm.avail_out == 0);
+                if (translated != inbuf)
+                    free(translated);
                 if (rc != ZU_STATUS_OK) {
                     break;
                 }
@@ -1476,7 +1413,6 @@ int zu_modify_archive(ZContext* ctx) {
     uint64_t offset = 0;
     int rc = ZU_STATUS_OK;
     size_t added = 0;
-    char* staged_path_global = NULL;
     uint64_t zip64_trigger = zip64_trigger_bytes();
 
     /* 4. Write Entries */
@@ -1590,11 +1526,7 @@ int zu_modify_archive(ZContext* ctx) {
             uint16_t dos_time = 0, dos_date = 0;
             msdos_datetime(&info.st, &dos_time, &dos_date);
 
-            bool streaming = info.is_stdin || !info.size_known;
-            bool needs_translation = ctx->line_mode != ZU_LINE_NONE;
-            if (needs_translation && streaming) {
-                streaming = false; /* stage for translation */
-            }
+            bool streaming = info.is_stdin || !info.size_known || ctx->line_mode != ZU_LINE_NONE;
             if (streaming) {
                 rc = write_streaming_entry(ctx, path, entry_name, &info, dos_time, dos_date, zip64_trigger, &offset, &entries);
                 if (rc != ZU_STATUS_OK)
@@ -1610,9 +1542,12 @@ int zu_modify_archive(ZContext* ctx) {
             uint64_t uncomp_size = 0, comp_size = 0;
             uint16_t method = 0, flags = 0;
             FILE* staged = NULL;
-            char* staged_path = NULL;
 
             if (S_ISDIR(info.st.st_mode)) {
+                if (!ctx->store_paths) {
+                    free(allocated);
+                    continue; /* -j: skip directory entries */
+                }
                 /* Directories have zero size, no CRC, store method */
                 crc = 0;
                 uncomp_size = 0;
@@ -1637,45 +1572,17 @@ int zu_modify_archive(ZContext* ctx) {
                     method = 0;
                 }
 
-                if (needs_translation) {
-                    FILE* trans_fp = NULL;
-                    rc = stage_translated(ctx, path, info.is_stdin, &trans_fp, &staged_path, &crc, &uncomp_size);
-                    if (rc != ZU_STATUS_OK) {
-                        goto cleanup;
-                    }
-                    staged = trans_fp;
-                    staged_path_global = staged_path;
-                    info.size_known = true;
-                    comp_size = uncomp_size;
-
-                    if (compress) {
-                        FILE* staged_comp = NULL;
-                        uint32_t ccrc = 0;
-                        uint64_t cuncomp = 0, ccomp = 0;
-                        rc = compress_to_temp(ctx, staged_path, method, ctx->compression_level, &staged_comp, &ccrc, &cuncomp, &ccomp);
-                        fclose(staged);
-                        staged = staged_comp;
-                        comp_size = ccomp;
-                        uncomp_size = cuncomp;
-                        crc = ccrc;
-                        if (rc != ZU_STATUS_OK) {
-                            goto cleanup;
-                        }
-                    }
+                if (compress) {
+                    rc = compress_to_temp(ctx, path, method, ctx->compression_level, &staged, &crc, &uncomp_size, &comp_size);
                 }
                 else {
-                    if (compress) {
-                        rc = compress_to_temp(ctx, path, method, ctx->compression_level, &staged, &crc, &uncomp_size, &comp_size);
-                    }
-                    else {
-                        rc = compute_crc_and_size(ctx, path, &crc, &uncomp_size);
-                        comp_size = uncomp_size;
-                    }
-                    if (rc != ZU_STATUS_OK) {
-                        if (staged)
-                            fclose(staged);
-                        goto cleanup;
-                    }
+                    rc = compute_crc_and_size(ctx, path, &crc, &uncomp_size);
+                    comp_size = uncomp_size;
+                }
+                if (rc != ZU_STATUS_OK) {
+                    if (staged)
+                        fclose(staged);
+                    goto cleanup;
                 }
             }
 
@@ -1771,12 +1678,6 @@ int zu_modify_archive(ZContext* ctx) {
             if (ctx->remove_source && !info.is_stdin) {
                 unlink(path);
             }
-            if (staged_path_global) {
-                unlink(staged_path_global);
-                free(staged_path_global);
-                staged_path_global = NULL;
-            }
-
             if (ensure_entry_capacity(&entries) != ZU_STATUS_OK) {
                 rc = ZU_STATUS_OOM;
                 goto cleanup;
@@ -1903,11 +1804,6 @@ int zu_modify_archive(ZContext* ctx) {
     }
 
 cleanup:
-    if (staged_path_global) {
-        unlink(staged_path_global);
-        free(staged_path_global);
-        staged_path_global = NULL;
-    }
     free_entries(&entries);
     if (ctx->out_file && ctx->out_file != stdout)
         fclose(ctx->out_file);
