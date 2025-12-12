@@ -441,27 +441,29 @@ static void print_usage(FILE* to, const char* argv0) {
     fprintf(to,
             "Usage: %s [options] archive.zip [inputs...]\n"
             "\n"
-            "Modern rewrite stub: captures options into a reentrant context but\n"
-            "does not yet perform archiving.\n"
+            "Info-ZIP–style CLI (archiving work still in progress).\n"
             "\n"
-            "If archive and inputs are omitted, zip reads stdin and writes the\n"
-            "archive to stdout (\"filter\" mode).\n"
+            "Modes:\n"
+            "  • Default: modify/create archive.zip\n"
+            "  • Filter: with no archive or inputs, read stdin and write zip to stdout\n"
+            "  • Input name \"-\": treat as file data from stdin; \"-@\": read names from stdin; \"--\": end options\n"
             "\n"
-            "Common options:\n"
-            "  -r, --recurse-paths   Recurse into directories\n"
-            "  -j                    Junk directory paths\n"
-            "  -m                    Move input files (delete after)\n"
-            "  -d                    Delete entries in zipfile\n"
-            "  -@                    Read names from stdin\n"
-            "  -u                    Update: add only newer files\n"
-            "  -f                    Freshen: replace existing entries\n"
-            "  -T                    Test archive after writing\n"
-            "  -q / -qq / -v         Quiet / really quiet / verbose output\n"
-            "  -x pattern            Exclude pattern (can repeat)\n"
-            "  -i pattern            Include pattern (can repeat)\n"
-            "  -0 .. -9              Compression level\n"
-            "  -Z method             Compression method (deflate, bzip2)\n"
-            "  --help                Show this help\n",
+            "Options parsed:\n"
+            "  Paths:      -r recurse, -j junk paths\n"
+            "  Update:     -u update newer, -f freshen, -m move, -d delete patterns, -FS filesync\n"
+            "  Select:     -x patterns..., -i patterns... (lists end at next option/--)\n"
+            "  Dates:      -t mmddyyyy (after), -tt mmddyyyy (before)\n"
+            "  Compress:   -0..-9 level, -Z method (deflate/store/bzip2)\n"
+            "  Output:     -O path (write elsewhere), \"-\" for stdout\n"
+            "  Split:      -s size[kmgt], -sp pause between parts\n"
+            "  Logging:    -lf file, -la append, -li info-level\n"
+            "  Quiet/Verb: -q (stackable) / -v, -T test after write\n"
+            "  Fix:        -F / -FF\n"
+            "  Encrypt:    -e, -P password\n"
+            "  Comments:   -z (zipfile comment from stdin)\n"
+            "  Zipnote:    -w (when invoked as zipnote)\n"
+            "  Not yet:    -b -c -o -n -D -X -y -A -J -l -ll\n"
+            "  --help      Show this help\n",
             argv0);
 }
 
@@ -966,23 +968,21 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                 ctx->output_to_stdout = true;
             }
             ++i;
-            break;
-        }
-
-        break;
-    }
-
-    for (; i < argc; ++i) {
-        if (!endopts && strcmp(argv[i], "--") == 0) {
-            endopts = true;
             continue;
         }
-        if (zu_strlist_push(&ctx->include, argv[i]) != 0)
+
+        if (zu_strlist_push(&ctx->include, tok) != 0)
             return ZU_STATUS_OOM;
+        ++i;
     }
 
     if (!ctx->archive_path) {
+        bool interactive = isatty(STDIN_FILENO) != 0;
         if (ctx->include.len == 0) {
+            if (interactive) {
+                print_usage(stderr, argv[0]);
+                return ZU_STATUS_USAGE;
+            }
             ctx->archive_path = "-";
             ctx->output_to_stdout = true;
             if (zu_strlist_push(&ctx->include, "-") != 0)
