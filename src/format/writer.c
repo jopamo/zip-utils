@@ -268,7 +268,10 @@ static int describe_input(ZContext* ctx, const char* path, zu_input_info* info) 
             return ZU_STATUS_IO;
         }
     }
-    if (S_ISFIFO(st.st_mode)) {
+    if (S_ISDIR(st.st_mode)) {
+        /* directories allowed */
+    }
+    else if (S_ISFIFO(st.st_mode)) {
         if (!ctx->allow_fifo) {
             zu_context_set_error(ctx, ZU_STATUS_USAGE, "refusing fifo (use flag to allow)");
             return ZU_STATUS_USAGE;
@@ -285,6 +288,10 @@ static int describe_input(ZContext* ctx, const char* path, zu_input_info* info) 
 
     info->st = st;
     info->size_known = !S_ISFIFO(st.st_mode);
+    if (S_ISDIR(st.st_mode)) {
+        info->st.st_size = 0;
+        info->size_known = true;
+    }
     info->is_stdin = false;
     return ZU_STATUS_OK;
 }
@@ -1251,18 +1258,8 @@ int zu_modify_archive(ZContext* ctx) {
         for (size_t i = 0; i < ctx->include.len; ++i) {
             const char* path = ctx->include.items[i];
             const char* stored = ctx->store_paths ? path : basename_component(path);
-
-            /* Check if this file replaces an existing one */
-            zu_existing_entry* existing = NULL;
-            if (existing_loaded) {
-                for (size_t j = 0; j < ctx->existing_entries.len; ++j) {
-                    zu_existing_entry* e = (zu_existing_entry*)ctx->existing_entries.items[j];
-                    if (!e->delete && strcmp(e->name, stored) == 0) {
-                        existing = e;
-                        break;
-                    }
-                }
-            }
+            char* allocated = NULL;
+            const char* entry_name = stored;
 
             /* Perform Update/Freshen Checks */
             zu_input_info info;
@@ -1273,15 +1270,46 @@ int zu_modify_archive(ZContext* ctx) {
                 goto cleanup;
             }
 
+            /* If directory, ensure entry name ends with '/' */
+            if (S_ISDIR(info.st.st_mode)) {
+                size_t len = strlen(stored);
+                if (len == 0 || stored[len - 1] != '/') {
+                    allocated = malloc(len + 2);
+                    if (!allocated) {
+                        zu_context_set_error(ctx, ZU_STATUS_OOM, "out of memory");
+                        rc = ZU_STATUS_OOM;
+                        goto cleanup;
+                    }
+                    memcpy(allocated, stored, len);
+                    allocated[len] = '/';
+                    allocated[len + 1] = '\0';
+                    entry_name = allocated;
+                }
+            }
+
+            /* Check if this file replaces an existing one */
+            zu_existing_entry* existing = NULL;
+            if (existing_loaded) {
+                for (size_t j = 0; j < ctx->existing_entries.len; ++j) {
+                    zu_existing_entry* e = (zu_existing_entry*)ctx->existing_entries.items[j];
+                    if (!e->delete && strcmp(e->name, entry_name) == 0) {
+                        existing = e;
+                        break;
+                    }
+                }
+            }
+
             /* Time Filtering */
             if (ctx->has_filter_after && info.st.st_mtime < ctx->filter_after) {
                 if (ctx->verbose || ctx->log_info)
                     zu_log(ctx, "skipping %s (older than -t)\n", path);
+                free(allocated);
                 continue;
             }
             if (ctx->has_filter_before && info.st.st_mtime >= ctx->filter_before) {
                 if (ctx->verbose || ctx->log_info)
                     zu_log(ctx, "skipping %s (newer than -tt)\n", path);
+                free(allocated);
                 continue;
             }
 
@@ -1301,22 +1329,24 @@ int zu_modify_archive(ZContext* ctx) {
                         /* Input is older or same, skip it. Keep existing. */
                         if (ctx->verbose || ctx->log_info)
                             zu_log(ctx, "skipping %s (not newer)\n", path);
+                        free(allocated);
                         continue;
                     }
                 }
                 /* We are replacing existing. Mark it for deletion. */
                 existing->delete = true;
                 if (ctx->verbose || ctx->log_info)
-                    zu_log(ctx, "updating: %s\n", stored);
+                    zu_log(ctx, "updating: %s\n", entry_name);
             }
             else {
                 /* New file */
                 if (ctx->freshen) {
                     /* Freshen only updates existing. Skip new. */
+                    free(allocated);
                     continue;
                 }
                 if (ctx->verbose || ctx->log_info)
-                    zu_log(ctx, "adding: %s\n", stored);
+                    zu_log(ctx, "adding: %s\n", entry_name);
             }
 
             /* Proceed to write this file */
@@ -1326,7 +1356,7 @@ int zu_modify_archive(ZContext* ctx) {
 
             bool streaming = info.is_stdin || !info.size_known;
             if (streaming) {
-                rc = write_streaming_entry(ctx, path, stored, &info, dos_time, dos_date, zip64_trigger, &offset, &entries);
+                rc = write_streaming_entry(ctx, path, entry_name, &info, dos_time, dos_date, zip64_trigger, &offset, &entries);
                 if (rc != ZU_STATUS_OK)
                     goto cleanup;
                 if (ctx->remove_source && !info.is_stdin) {
@@ -1338,6 +1368,7 @@ int zu_modify_archive(ZContext* ctx) {
                         goto cleanup;
                     }
                 }
+                free(allocated);
                 continue;
             }
 
@@ -1346,31 +1377,40 @@ int zu_modify_archive(ZContext* ctx) {
             uint16_t method = 0, flags = 0;
             FILE* staged = NULL;
 
-            bool compress = ctx->compression_level > 0;
-            if (info.st.st_size == 0)
-                compress = false;
-
-            if (compress) {
-                method = ctx->compression_method;
-                if (method == 0) {
-                    compress = false;
-                }
-            }
-            else {
+            if (S_ISDIR(info.st.st_mode)) {
+                /* Directories have zero size, no CRC, store method */
+                crc = 0;
+                uncomp_size = 0;
+                comp_size = 0;
                 method = 0;
             }
-
-            if (compress) {
-                rc = compress_to_temp(ctx, path, method, ctx->compression_level, &staged, &crc, &uncomp_size, &comp_size);
-            }
             else {
-                rc = compute_crc_and_size(ctx, path, &crc, &uncomp_size);
-                comp_size = uncomp_size;
-            }
-            if (rc != ZU_STATUS_OK) {
-                if (staged)
-                    fclose(staged);
-                goto cleanup;
+                bool compress = ctx->compression_level > 0;
+                if (info.st.st_size == 0)
+                    compress = false;
+
+                if (compress) {
+                    method = ctx->compression_method;
+                    if (method == 0) {
+                        compress = false;
+                    }
+                }
+                else {
+                    method = 0;
+                }
+
+                if (compress) {
+                    rc = compress_to_temp(ctx, path, method, ctx->compression_level, &staged, &crc, &uncomp_size, &comp_size);
+                }
+                else {
+                    rc = compute_crc_and_size(ctx, path, &crc, &uncomp_size);
+                    comp_size = uncomp_size;
+                }
+                if (rc != ZU_STATUS_OK) {
+                    if (staged)
+                        fclose(staged);
+                    goto cleanup;
+                }
             }
 
             uint64_t payload_size = comp_size;
@@ -1384,7 +1424,7 @@ int zu_modify_archive(ZContext* ctx) {
             bool zip64_lho = (comp_size >= zip64_trigger || uncomp_size >= zip64_trigger || offset >= zip64_trigger);
             uint16_t extra_len = zip64_lho ? (uint16_t)(4 + 2 * sizeof(uint64_t)) : 0;
             uint16_t version_needed = zip64_lho ? 45 : (method == 0 ? 10 : 20);
-            size_t name_len = strlen(stored);
+            size_t name_len = strlen(entry_name);
 
             uint32_t ext_attr = 0;
             uint16_t version_made = 20; /* Default: FAT/DOS, version 2.0 */
@@ -1412,7 +1452,7 @@ int zu_modify_archive(ZContext* ctx) {
                 .extra_len = extra_len,
             };
 
-            if (zu_write_output(ctx, &lho, sizeof(lho)) != ZU_STATUS_OK || zu_write_output(ctx, stored, name_len) != ZU_STATUS_OK) {
+            if (zu_write_output(ctx, &lho, sizeof(lho)) != ZU_STATUS_OK || zu_write_output(ctx, entry_name, name_len) != ZU_STATUS_OK) {
                 zu_context_set_error(ctx, ZU_STATUS_IO, "write local header failed");
                 rc = ZU_STATUS_IO;
                 if (staged)
@@ -1450,17 +1490,24 @@ int zu_modify_archive(ZContext* ctx) {
                 }
             }
 
-            rc = write_file_data(ctx, path, staged, payload_size, pzc);
-            if (staged)
-                fclose(staged);
-            if (rc != ZU_STATUS_OK)
-                goto cleanup;
+            if (!S_ISDIR(info.st.st_mode)) {
+                rc = write_file_data(ctx, path, staged, payload_size, pzc);
+                if (staged)
+                    fclose(staged);
+                if (rc != ZU_STATUS_OK)
+                    goto cleanup;
+            }
+            else {
+                /* Directory has no data to write */
+                if (staged)
+                    fclose(staged);
+            }
 
             if (ensure_entry_capacity(&entries) != ZU_STATUS_OK) {
                 rc = ZU_STATUS_OOM;
                 goto cleanup;
             }
-            entries.items[entries.len].name = strdup(stored);
+            entries.items[entries.len].name = strdup(entry_name);
             entries.items[entries.len].crc32 = crc;
             entries.items[entries.len].comp_size = comp_size;
             entries.items[entries.len].uncomp_size = uncomp_size;
@@ -1491,11 +1538,13 @@ int zu_modify_archive(ZContext* ctx) {
                 if (unlink(path) != 0) {
                     char msg[128];
                     snprintf(msg, sizeof(msg), "remove '%s' failed: %s", path, strerror(errno));
+                    free(allocated);
                     zu_context_set_error(ctx, ZU_STATUS_IO, msg);
                     rc = ZU_STATUS_IO;
                     goto cleanup;
                 }
             }
+            free(allocated);
         }
     }
 
