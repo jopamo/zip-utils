@@ -54,6 +54,8 @@ static int map_exit_code(int status) {
             return 2;
         case ZU_STATUS_OOM:
             return 5;
+        case ZU_STATUS_NO_FILES:
+            return 12;
         case ZU_STATUS_NOT_IMPLEMENTED:
             return 3;
         default:

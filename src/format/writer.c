@@ -1249,6 +1249,7 @@ int zu_modify_archive(ZContext* ctx) {
     zu_entry_list entries = {0};
     uint64_t offset = 0;
     int rc = ZU_STATUS_OK;
+    size_t added = 0;
     uint64_t zip64_trigger = zip64_trigger_bytes();
 
     /* 4. Write Entries */
@@ -1257,6 +1258,12 @@ int zu_modify_archive(ZContext* ctx) {
     if (!ctx->difference_mode) {
         for (size_t i = 0; i < ctx->include.len; ++i) {
             const char* path = ctx->include.items[i];
+            /* Exclude/include pattern filtering */
+            if (!zu_should_include(ctx, path)) {
+                if (ctx->verbose || ctx->log_info)
+                    zu_log(ctx, "skipping %s (excluded)\n", path);
+                continue;
+            }
             const char* stored = ctx->store_paths ? path : basename_component(path);
             char* allocated = NULL;
             const char* entry_name = stored;
@@ -1264,10 +1271,10 @@ int zu_modify_archive(ZContext* ctx) {
             /* Perform Update/Freshen Checks */
             zu_input_info info;
             if (describe_input(ctx, path, &info) != ZU_STATUS_OK) {
-                /* If file not found, skip or error? Standard zip warns and skips.
-                   For now, we abort on error as per original writer. */
-                rc = ctx->last_error;
-                goto cleanup;
+                /* If file not found, skip with warning (standard zip behavior). */
+                if (ctx->verbose || ctx->log_info)
+                    zu_log(ctx, "zip: %s not found or not readable\n", path);
+                continue;
             }
 
             /* If directory, ensure entry name ends with '/' */
@@ -1337,6 +1344,7 @@ int zu_modify_archive(ZContext* ctx) {
                 existing->delete = true;
                 if (ctx->verbose || ctx->log_info)
                     zu_log(ctx, "updating: %s\n", entry_name);
+                added++;
             }
             else {
                 /* New file */
@@ -1347,6 +1355,7 @@ int zu_modify_archive(ZContext* ctx) {
                 }
                 if (ctx->verbose || ctx->log_info)
                     zu_log(ctx, "adding: %s\n", entry_name);
+                added++;
             }
 
             /* Proceed to write this file */
@@ -1546,6 +1555,12 @@ int zu_modify_archive(ZContext* ctx) {
             }
             free(allocated);
         }
+    }
+
+    /* Check if any files were added/updated */
+    if (added == 0 && !ctx->difference_mode) {
+        rc = ZU_STATUS_NO_FILES;
+        goto cleanup;
     }
 
     /* 4b. Write Kept Existing Entries */

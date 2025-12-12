@@ -15,19 +15,28 @@
 
 static time_t parse_date(const char* str) {
     struct tm tm = {0};
+    char* end;
     // Initialize tm to avoid garbage
     tm.tm_isdst = -1;
 
     // Try ISO 8601: yyyy-mm-dd
-    if (strptime(str, "%Y-%m-%d", &tm)) {
-        return mktime(&tm);
+    end = strptime(str, "%Y-%m-%d", &tm);
+    if (end && *end == '\0') {
+        // Validate month/day ranges (mktime will normalize, but we can reject invalid)
+        if (tm.tm_mon >= 0 && tm.tm_mon <= 11 && tm.tm_mday >= 1 && tm.tm_mday <= 31) {
+            return mktime(&tm);
+        }
     }
 
     // Try mmddyyyy
     memset(&tm, 0, sizeof(tm));
     tm.tm_isdst = -1;
-    if (strptime(str, "%m%d%Y", &tm)) {
-        return mktime(&tm);
+    end = strptime(str, "%m%d%Y", &tm);
+    if (end && *end == '\0') {
+        // Validate month/day ranges
+        if (tm.tm_mon >= 0 && tm.tm_mon <= 11 && tm.tm_mday >= 1 && tm.tm_mday <= 31) {
+            return mktime(&tm);
+        }
     }
 
     return (time_t)-1;
@@ -74,11 +83,13 @@ static int map_exit_code(int status) {
         case ZU_STATUS_OK:
             return 0;
         case ZU_STATUS_USAGE:
-            return 10;
+            return 16;
         case ZU_STATUS_IO:
             return 2;
         case ZU_STATUS_OOM:
             return 5;
+        case ZU_STATUS_NO_FILES:
+            return 12;
         case ZU_STATUS_NOT_IMPLEMENTED:
             return 3;
         default:
@@ -648,7 +659,7 @@ int main(int argc, char** argv) {
     int parse_rc = parse_zip_args(argc, argv, ctx, is_zipnote);
     if (parse_rc == ZU_STATUS_USAGE) {
         zu_context_free(ctx);
-        return 0;
+        return map_exit_code(ZU_STATUS_USAGE);
     }
     if (parse_rc != ZU_STATUS_OK) {
         fprintf(stderr, "zip: argument parsing failed (%s)\n", zu_status_str(parse_rc));

@@ -45,6 +45,7 @@ ZContext* zu_context_create(void) {
     ctx->has_filter_before = false;
 
     zu_strlist_init(&ctx->include);
+    zu_strlist_init(&ctx->include_patterns);
     zu_strlist_init(&ctx->exclude);
     zu_strlist_init(&ctx->existing_entries);
 
@@ -74,6 +75,7 @@ void zu_context_free(ZContext* ctx) {
     free(ctx->log_path);
 
     zu_strlist_free(&ctx->include);
+    zu_strlist_free(&ctx->include_patterns);
     zu_strlist_free(&ctx->exclude);
     zu_strlist_free_with_dtor(&ctx->existing_entries, zu_existing_entry_free);
     free(ctx->io_buffer);

@@ -12,6 +12,10 @@
 #include <stdlib.h>
 #include <strings.h>
 #include <unistd.h>
+#include <fnmatch.h>
+#ifndef FNM_CASEFOLD
+#define FNM_CASEFOLD 0
+#endif
 
 static void close_file(FILE** fp) {
     if (fp && *fp) {
@@ -328,6 +332,29 @@ static int walk_dir(ZContext* ctx, const char* root, ZU_StrList* list) {
     return ZU_STATUS_OK;
 }
 
+bool zu_should_include(const ZContext* ctx, const char* name) {
+    int flags = ctx->match_case ? 0 : FNM_CASEFOLD;
+
+    /* Exclude wins immediately. */
+    for (size_t i = 0; i < ctx->exclude.len; ++i) {
+        if (fnmatch(ctx->exclude.items[i], name, flags) == 0) {
+            return false;
+        }
+    }
+
+    /* If include list is empty, everything is included. */
+    if (ctx->include.len == 0) {
+        return true;
+    }
+
+    for (size_t i = 0; i < ctx->include.len; ++i) {
+        if (fnmatch(ctx->include.items[i], name, flags) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 int zu_expand_args(ZContext* ctx) {
     if (!ctx)
         return ZU_STATUS_USAGE;
@@ -354,9 +381,24 @@ int zu_expand_args(ZContext* ctx) {
         }
     }
 
+    /* Filter new_list by exclude/include patterns */
+    ZU_StrList filtered;
+    zu_strlist_init(&filtered);
+    for (size_t i = 0; i < new_list.len; ++i) {
+        const char* path = new_list.items[i];
+        if (zu_should_include(ctx, path)) {
+            if (zu_strlist_push(&filtered, path) != 0) {
+                zu_strlist_free(&new_list);
+                zu_strlist_free(&filtered);
+                return ZU_STATUS_OOM;
+            }
+        }
+    }
+    zu_strlist_free(&new_list);
+
     /* Swap lists */
     zu_strlist_free(&ctx->include);
-    ctx->include = new_list;
+    ctx->include = filtered;
 
     return ZU_STATUS_OK;
 }

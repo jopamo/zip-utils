@@ -84,6 +84,7 @@ struct ZContext {
     const char* archive_path;
     const char* target_dir;
     ZU_StrList include;
+    ZU_StrList include_patterns;
     ZU_StrList exclude;
 
     // Modification specific flags
