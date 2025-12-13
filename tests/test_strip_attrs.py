@@ -10,9 +10,13 @@ from pathlib import Path
 
 ATTR_TAGS = {0x5455, 0x5855, 0x7875}
 
+BASE_ENV = os.environ.copy()
+for var in ("ZIPOPT", "ZIP"):
+    BASE_ENV.pop(var, None)
+
 
 def run(cmd, cwd=None):
-    return subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return subprocess.run(cmd, cwd=cwd, env=BASE_ENV, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
 def parse_local_extra(zip_path: Path, name: str) -> bytes:
