@@ -1094,6 +1094,7 @@ static int write_streaming_entry(ZContext* ctx,
     }
 
     bool size_unknown = !info->size_known;
+    uint64_t size_hint = info->size_known ? (uint64_t)info->st.st_size : 0;
     bool compress = should_compress_file(ctx, info, path);
     if (info->size_known && info->st.st_size == 0) {
         compress = false;
@@ -1111,7 +1112,7 @@ static int write_streaming_entry(ZContext* ctx,
 
     size_t name_len = strlen(stored);
 
-    bool header_zip64 = size_unknown || *offset >= zip64_trigger;
+    bool header_zip64 = size_unknown || *offset >= zip64_trigger || size_hint >= zip64_trigger;
     uint16_t version_needed = header_zip64 ? 45 : (method == 0 ? 10 : 20);
 
     uint16_t extra_len = header_zip64 ? (uint16_t)(4 + 2 * sizeof(uint64_t)) : 0;
@@ -2139,7 +2140,11 @@ int zu_modify_archive(ZContext* ctx) {
 
             update_newest_mtime(ctx, info.st.st_mtime);
 
-            bool streaming = info.is_stdin || !info.size_known || ctx->line_mode != ZU_LINE_NONE;
+            /* Prefer the streaming path so we only read each input once (data descriptor / bit 3) */
+            bool streaming = !S_ISDIR(info.st.st_mode) && !is_symlink;
+            if (info.is_stdin || !info.size_known || ctx->line_mode != ZU_LINE_NONE) {
+                streaming = true;
+            }
             bool compress = false;
             if (S_ISDIR(info.st.st_mode)) {
                 compress = false;
