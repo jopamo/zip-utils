@@ -32,6 +32,7 @@
 #include "zip_headers.h"
 #include "zipcrypto.h"
 #include "bzip2_shim.h"
+#include "zlib_shim.h"
 
 #define ZU_EXTRA_ZIP64 0x0001
 #define ZU_IO_CHUNK (64 * 1024)
@@ -186,6 +187,8 @@ static int ensure_entry_capacity(zu_entry_list* list) {
 static bool path_is_stdin(const char* path) {
     return path && strcmp(path, "-") == 0;
 }
+
+static int effective_deflate_level(const ZContext* ctx);
 
 static bool copy_mode_keep(const ZContext* ctx, const char* name) {
     if (!ctx || !name) {
@@ -435,8 +438,70 @@ static uint32_t current_disk_index(const ZContext* ctx) {
     return 0;
 }
 
+static bool file_is_likely_text(const char* path) {
+    FILE* fp = fopen(path, "rb");
+    if (!fp)
+        return false;
+    uint8_t buf[4096];
+    size_t got = fread(buf, 1, sizeof(buf), fp);
+    fclose(fp);
+    if (got == 0)
+        return true; /* empty file */
+    for (size_t i = 0; i < got; i++) {
+        if (buf[i] == 0)
+            return false;
+    }
+    return true;
+}
+
+/* Quick in-memory probe to see if deflate would beat store for small files
+   This keeps fast-write streaming while still avoiding pointless compression */
+static int deflate_outperforms_store(const ZContext* ctx, const zu_input_info* info, const char* path, bool* out_deflate) {
+    if (!ctx || !info || !path || !out_deflate) {
+        return ZU_STATUS_USAGE;
+    }
+    *out_deflate = true;
+
+    size_t size = (size_t)info->st.st_size;
+    if (size == 0) {
+        *out_deflate = false;
+        return ZU_STATUS_OK;
+    }
+    uint8_t* buf = malloc(size);
+    if (!buf) {
+        return ZU_STATUS_OOM;
+    }
+
+    FILE* fp = fopen(path, "rb");
+    if (!fp) {
+        free(buf);
+        return ZU_STATUS_IO;
+    }
+
+    size_t got = fread(buf, 1, size, fp);
+    bool read_error = (got != size) || ferror(fp);
+    fclose(fp);
+    if (read_error) {
+        free(buf);
+        return ZU_STATUS_IO;
+    }
+
+    uint8_t* comp = NULL;
+    size_t comp_len = 0;
+    int level = effective_deflate_level(ctx);
+    int rc = zu_deflate_buffer(buf, size, level, &comp, &comp_len);
+    free(buf);
+    if (rc != ZU_STATUS_OK) {
+        return rc;
+    }
+
+    *out_deflate = comp_len < size;
+    free(comp);
+    return ZU_STATUS_OK;
+}
+
 static bool should_compress_file(ZContext* ctx, const zu_input_info* info, const char* path) {
-    (void)info;
+    fprintf(stderr, "DEBUG should_compress: path=%s size=%ld fast_write=%d\n", path ? path : "(null)", info ? (long)info->st.st_size : -1, ctx ? ctx->fast_write : -1);
     if (!ctx) {
         return false;
     }
@@ -446,15 +511,31 @@ static bool should_compress_file(ZContext* ctx, const zu_input_info* info, const
     if (ctx->line_mode != ZU_LINE_NONE) {
         return false; /* Info-ZIP stores when translating lines */
     }
+    if (info && info->is_stdin) {
+        return false; /* Streamed stdin entries are stored to avoid data descriptors */
+    }
     if (path && should_store_by_suffix(ctx, path)) {
         return false;
     }
+    /* Store very small non-text files in fast-write mode to reduce overhead */
+    if (ctx->fast_write && info && info->size_known && (uint64_t)info->st.st_size <= (uint64_t)1 * 1024 && (!path || !file_is_likely_text(path))) {
+        return false;
+    }
     if (ctx->fast_write && info && info->size_known) {
-        /* Store tiny files to avoid deflate setup overhead in fast mode */
-        if ((uint64_t)info->st.st_size <= (uint64_t)32 * 1024) {
-            return false;
+        if (!info->is_stdin && ctx->compression_method == 8 && ctx->line_mode == ZU_LINE_NONE && (uint64_t)info->st.st_size <= (uint64_t)32 * 1024) {
+            bool skip_probe = false;
+            /* Text files compress well at any level */
+            if (file_is_likely_text(path)) {
+                skip_probe = true;
+            }
+            if (!skip_probe) {
+                bool deflate_better = true;
+                if (deflate_outperforms_store(ctx, info, path, &deflate_better) == ZU_STATUS_OK && !deflate_better) {
+                    return false;
+                }
+            }
         }
-        if (ctx->compression_level <= 1 && (uint64_t)info->st.st_size >= (uint64_t)64 * 1024) {
+        if (ctx->compression_level <= 1 && (uint64_t)info->st.st_size >= (uint64_t)64 * 1024 && (!path || !file_is_likely_text(path))) {
             return false; /* fast-write level 0/1: store larger incompressible candidates */
         }
     }
@@ -1152,6 +1233,7 @@ static int write_streaming_entry(ZContext* ctx,
                                  uint64_t entry_lho_offset,
                                  uint32_t entry_disk_start,
                                  uint64_t zip64_trigger,
+                                 const zu_existing_entry* existing,
                                  uint64_t* offset,
                                  zu_entry_list* entries) {
     if (!ctx || !stored || !info || !offset || !entries) {
@@ -1477,6 +1559,17 @@ static int write_streaming_entry(ZContext* ctx,
     entries->items[entries->len].disk_start = entry_disk_start;
     entries->items[entries->len].comment = NULL;
     entries->items[entries->len].comment_len = 0;
+    if (existing && existing->comment && existing->comment_len > 0) {
+        entries->items[entries->len].comment = malloc(existing->comment_len);
+        if (!entries->items[entries->len].comment) {
+            zu_context_set_error(ctx, ZU_STATUS_OOM, "allocating entry comment failed");
+            free(entries->items[entries->len].name);
+            entries->items[entries->len].name = NULL;
+            return ZU_STATUS_OOM;
+        }
+        memcpy(entries->items[entries->len].comment, existing->comment, existing->comment_len);
+        entries->items[entries->len].comment_len = existing->comment_len;
+    }
     entries->len++;
 
     log_entry_action(ctx, "adding", stored, method, comp_size, uncomp_size);
@@ -1494,6 +1587,7 @@ static int write_stdin_staged_entry(ZContext* ctx,
                                     uint64_t entry_lho_offset,
                                     uint32_t entry_disk_start,
                                     uint64_t zip64_trigger,
+                                    const zu_existing_entry* existing,
                                     uint64_t* offset,
                                     zu_entry_list* entries) {
     if (!ctx || !stored || !info || !offset || !entries) {
@@ -1515,15 +1609,6 @@ static int write_stdin_staged_entry(ZContext* ctx,
     uint16_t method = compress ? ctx->compression_method : 0;
     if (method == 0) {
         compress = false;
-    }
-
-    if (compress && ctx->fast_write && (ctx->fast_write_threshold == 0 || staged.size <= ctx->fast_write_threshold)) {
-        int saved_line = ctx->line_mode;
-        ctx->line_mode = ZU_LINE_NONE;
-        int stream_rc = write_streaming_entry(ctx, staged.path, stored, &staged_info, dos_time, dos_date, entry_lho_offset, entry_disk_start, zip64_trigger, offset, entries);
-        ctx->line_mode = saved_line;
-        free_stdin_stage(&staged);
-        return stream_rc;
     }
 
     uint64_t uncomp_size = staged.size;
@@ -1649,6 +1734,18 @@ static int write_stdin_staged_entry(ZContext* ctx,
     entries->items[entries->len].disk_start = entry_disk_start;
     entries->items[entries->len].comment = NULL;
     entries->items[entries->len].comment_len = 0;
+    if (existing && existing->comment && existing->comment_len > 0) {
+        entries->items[entries->len].comment = malloc(existing->comment_len);
+        if (!entries->items[entries->len].comment) {
+            zu_context_set_error(ctx, ZU_STATUS_OOM, "allocating entry comment failed");
+            free(entries->items[entries->len].name);
+            entries->items[entries->len].name = NULL;
+            rc = ZU_STATUS_OOM;
+            goto cleanup;
+        }
+        memcpy(entries->items[entries->len].comment, existing->comment, existing->comment_len);
+        entries->items[entries->len].comment_len = existing->comment_len;
+    }
     entries->len++;
 
     log_entry_action(ctx, "adding", stored, method, comp_size, uncomp_size);
@@ -2213,20 +2310,19 @@ int zu_modify_archive(ZContext* ctx) {
 
             update_newest_mtime(ctx, info.st.st_mtime);
 
-            /* Prefer the streaming path so we only read each input once (data descriptor / bit 3) */
-            bool streaming = !S_ISDIR(info.st.st_mode) && !is_symlink;
-            if (info.is_stdin || !info.size_known || ctx->line_mode != ZU_LINE_NONE) {
-                streaming = true;
+            /* Stream only when necessary (stdin/unknown size/line mode) or when fast-write is requested */
+            bool streaming = false;
+            if (!S_ISDIR(info.st.st_mode) && !is_symlink) {
+                if (info.is_stdin || !info.size_known || ctx->line_mode != ZU_LINE_NONE || ctx->fast_write) {
+                    streaming = true;
+                }
             }
             bool compress = false;
             if (S_ISDIR(info.st.st_mode)) {
                 compress = false;
             }
             else if (streaming) {
-                compress = ctx->compression_level > 0 && ctx->compression_method != 0 && ctx->line_mode == ZU_LINE_NONE;
-                if (should_store_by_suffix(ctx, path)) {
-                    compress = false;
-                }
+                compress = should_compress_file(ctx, &info, path);
                 if (info.size_known && info.st.st_size == 0) {
                     compress = false;
                 }
@@ -2258,10 +2354,10 @@ int zu_modify_archive(ZContext* ctx) {
 
             if (streaming) {
                 if (info.is_stdin) {
-                    rc = write_stdin_staged_entry(ctx, entry_name, &info, dos_time, dos_date, entry_lho_offset, entry_disk_start, zip64_trigger, &offset, &entries);
+                    rc = write_stdin_staged_entry(ctx, entry_name, &info, dos_time, dos_date, entry_lho_offset, entry_disk_start, zip64_trigger, existing, &offset, &entries);
                 }
                 else {
-                    rc = write_streaming_entry(ctx, path, entry_name, &info, dos_time, dos_date, entry_lho_offset, entry_disk_start, zip64_trigger, &offset, &entries);
+                    rc = write_streaming_entry(ctx, path, entry_name, &info, dos_time, dos_date, entry_lho_offset, entry_disk_start, zip64_trigger, existing, &offset, &entries);
                 }
                 if (rc != ZU_STATUS_OK)
                     goto cleanup;
