@@ -7,8 +7,13 @@ from pathlib import Path
 import zipfile
 
 
+BASE_ENV = os.environ.copy()
+for var in ("ZIPOPT", "ZIP", "UNZIPOPT", "ZIPINFO"):
+    BASE_ENV.pop(var, None)
+
+
 def run(cmd, cwd=None):
-    return subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return subprocess.run(cmd, cwd=cwd, env=BASE_ENV, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
 def main():
@@ -35,6 +40,7 @@ def main():
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env=BASE_ENV,
         )
         if comment_res.returncode != 0:
             raise SystemExit(f"zip comment failed: {comment_res.stderr}")
