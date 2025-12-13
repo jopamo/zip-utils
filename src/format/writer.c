@@ -18,6 +18,7 @@
 #include <unistd.h>
 #include <zlib.h>
 #include <fnmatch.h>
+
 #ifndef FNM_CASEFOLD
 #define FNM_CASEFOLD 0
 #endif
@@ -43,8 +44,8 @@ static const char* compression_method_name(uint16_t method) {
     }
 }
 
-/* Extra fields that store platform attributes we drop when -X is set.
-   Keep structural extras (e.g., Zip64) so entries stay readable. */
+/* Extra fields that store platform attributes we drop when -X is set
+   Keep structural extras (e.g., Zip64) so entries stay readable */
 static bool should_strip_attr_extra(uint16_t tag) {
     switch (tag) {
         case ZU_EXTRA_ZIP64:
@@ -60,10 +61,17 @@ static bool should_strip_attr_extra(uint16_t tag) {
     }
 }
 
+/* Always returns an owned buffer when extra_len > 0
+   Callers may always free(*out_extra) when non-NULL */
 static int filter_extra_for_exclude(const uint8_t* extra, uint16_t extra_len, uint8_t** out_extra, uint16_t* out_len) {
+    if (!out_extra || !out_len) {
+        return ZU_STATUS_USAGE;
+    }
+
+    *out_extra = NULL;
+    *out_len = 0;
+
     if (!extra || extra_len == 0) {
-        *out_extra = NULL;
-        *out_len = 0;
         return ZU_STATUS_OK;
     }
 
@@ -74,35 +82,27 @@ static int filter_extra_for_exclude(const uint8_t* extra, uint16_t extra_len, ui
 
     size_t pos = 0;
     size_t out = 0;
-    bool dropped = false;
 
     while (pos + 4 <= extra_len) {
         uint16_t tag = 0;
         uint16_t sz = 0;
         memcpy(&tag, extra + pos, sizeof(tag));
         memcpy(&sz, extra + pos + 2, sizeof(sz));
-        size_t end = pos + 4 + sz;
+        size_t end = pos + 4 + (size_t)sz;
+
         if (end > extra_len) {
-            free(buf);
-            *out_extra = (uint8_t*)extra;
+            memcpy(buf, extra, extra_len);
+            *out_extra = buf;
             *out_len = extra_len;
             return ZU_STATUS_OK;
         }
-        if (!should_strip_attr_extra(tag)) {
-            memcpy(buf + out, extra + pos, 4 + sz);
-            out += 4 + sz;
-        }
-        else {
-            dropped = true;
-        }
-        pos = end;
-    }
 
-    if (!dropped) {
-        free(buf);
-        *out_extra = (uint8_t*)extra;
-        *out_len = extra_len;
-        return ZU_STATUS_OK;
+        if (!should_strip_attr_extra(tag)) {
+            memcpy(buf + out, extra + pos, 4 + (size_t)sz);
+            out += 4 + (size_t)sz;
+        }
+
+        pos = end;
     }
 
     *out_extra = buf;
@@ -225,10 +225,13 @@ static bool should_store_by_suffix(const ZContext* ctx, const char* path) {
 
 static void make_attrs(const ZContext* ctx, const struct stat* st, bool is_dir, uint32_t* ext_attr, uint16_t* version_made) {
     uint32_t ext = 0;
-    uint16_t vmade = 20;
-#if defined(__unix__) || defined(__APPLE__) || defined(__linux__)
-    vmade = (3 << 8) | 20;
-    if (!ctx->exclude_extra_attrs) {
+    uint16_t vmade = (3 << 8) | 20;
+
+    if (ctx->exclude_extra_attrs) {
+        ext = 0;
+        vmade = 20; /* host = FAT */
+    }
+    else {
         uint8_t dos_attr = 0;
         if (is_dir)
             dos_attr |= 0x10;
@@ -236,14 +239,7 @@ static void make_attrs(const ZContext* ctx, const struct stat* st, bool is_dir, 
             dos_attr |= 0x01;
         ext = ((uint32_t)st->st_mode << 16) | dos_attr;
     }
-#else
-    (void)st;
-    (void)is_dir;
-#endif
-    if (ctx->exclude_extra_attrs) {
-        ext = 0;
-        vmade = 20; /* host = FAT */
-    }
+
     if (ext_attr)
         *ext_attr = ext;
     if (version_made)
@@ -315,6 +311,7 @@ static char* make_temp_path(const ZContext* ctx, const char* target_path) {
     const char* dir_sep = strrchr(target_path, '/');
     char dirbuf[PATH_MAX];
     const char* dir = ".";
+
     if (ctx->temp_dir) {
         dir = ctx->temp_dir;
     }
@@ -390,12 +387,12 @@ static int apply_mtime(const char* path, time_t t) {
 static time_t dos_to_unix_time(uint16_t dos_date, uint16_t dos_time) {
     struct tm t;
     memset(&t, 0, sizeof(t));
-    t.tm_year = ((dos_date >> 9) & 0x7f) + 80;  // years since 1900
-    t.tm_mon = ((dos_date >> 5) & 0x0f) - 1;    // 0-11
-    t.tm_mday = dos_date & 0x1f;                // 1-31
-    t.tm_hour = (dos_time >> 11) & 0x1f;        // 0-23
-    t.tm_min = (dos_time >> 5) & 0x3f;          // 0-59
-    t.tm_sec = (dos_time & 0x1f) * 2;           // 0-58 even
+    t.tm_year = ((dos_date >> 9) & 0x7f) + 80; /* years since 1900 */
+    t.tm_mon = ((dos_date >> 5) & 0x0f) - 1;   /* 0-11 */
+    t.tm_mday = dos_date & 0x1f;               /* 1-31 */
+    t.tm_hour = (dos_time >> 11) & 0x1f;       /* 0-23 */
+    t.tm_min = (dos_time >> 5) & 0x3f;         /* 0-59 */
+    t.tm_sec = (dos_time & 0x1f) * 2;          /* 0-58 even */
     t.tm_isdst = -1;
     return mktime(&t);
 }
@@ -435,6 +432,7 @@ static uint32_t current_disk_index(const ZContext* ctx) {
 }
 
 static bool should_compress_file(ZContext* ctx, const zu_input_info* info, const char* path) {
+    (void)info;
     if (!ctx) {
         return false;
     }
@@ -487,7 +485,7 @@ static int compression_percent(uint64_t comp_size, uint64_t uncomp_size) {
         return 0;
     }
     int64_t delta = (int64_t)uncomp_size - (int64_t)comp_size;
-    /* Info-ZIP rounds using integer math with an extra digit of precision. */
+    /* Info-ZIP rounds using integer math with an extra digit of precision */
     int64_t pct_times_ten = ((delta * 1000) / (int64_t)uncomp_size) + 5;
     int pct = (int)(pct_times_ten / 10);
     if (pct < -99)
@@ -553,6 +551,7 @@ static int describe_input(ZContext* ctx, const char* path, zu_input_info* info) 
         zu_context_set_error(ctx, ZU_STATUS_IO, msg);
         return ZU_STATUS_IO;
     }
+
     if (S_ISLNK(st.st_mode)) {
         if (ctx->store_symlinks) {
             info->is_symlink = true;
@@ -573,10 +572,11 @@ static int describe_input(ZContext* ctx, const char* path, zu_input_info* info) 
                 return ZU_STATUS_OOM;
             }
             info->link_target_len = (size_t)llen;
-            info->st.st_size = info->link_target_len;
+            info->st.st_size = (off_t)info->link_target_len;
             info->is_stdin = false;
             return ZU_STATUS_OK;
         }
+
         if (!ctx->allow_symlinks) {
             zu_context_set_error(ctx, ZU_STATUS_USAGE, "refusing to follow symlink (use -y to store it)");
             return ZU_STATUS_USAGE;
@@ -588,6 +588,7 @@ static int describe_input(ZContext* ctx, const char* path, zu_input_info* info) 
             return ZU_STATUS_IO;
         }
     }
+
     if (S_ISDIR(st.st_mode)) {
         /* directories allowed */
     }
@@ -601,6 +602,7 @@ static int describe_input(ZContext* ctx, const char* path, zu_input_info* info) 
         zu_context_set_error(ctx, ZU_STATUS_USAGE, "only regular files are supported");
         return ZU_STATUS_USAGE;
     }
+
     if (st.st_size < 0) {
         zu_context_set_error(ctx, ZU_STATUS_USAGE, "negative file size reported");
         return ZU_STATUS_USAGE;
@@ -1108,10 +1110,11 @@ static int write_streaming_entry(ZContext* ctx,
     }
 
     size_t name_len = strlen(stored);
-    uint16_t version_needed = (method == 0 ? 10 : 20);
-    if (size_unknown || *offset >= zip64_trigger) {
-        version_needed = 45;
-    }
+
+    bool header_zip64 = size_unknown || *offset >= zip64_trigger;
+    uint16_t version_needed = header_zip64 ? 45 : (method == 0 ? 10 : 20);
+
+    uint16_t extra_len = header_zip64 ? (uint16_t)(4 + 2 * sizeof(uint64_t)) : 0;
 
     zu_local_header lho = {
         .signature = ZU_SIG_LOCAL,
@@ -1121,15 +1124,25 @@ static int write_streaming_entry(ZContext* ctx,
         .mod_time = dos_time,
         .mod_date = dos_date,
         .crc32 = 0,
-        .comp_size = 0,
-        .uncomp_size = 0,
+        .comp_size = header_zip64 ? 0xffffffffu : 0,
+        .uncomp_size = header_zip64 ? 0xffffffffu : 0,
         .name_len = (uint16_t)name_len,
-        .extra_len = 0,
+        .extra_len = extra_len,
     };
 
     if (zu_write_output(ctx, &lho, sizeof(lho)) != ZU_STATUS_OK || zu_write_output(ctx, stored, name_len) != ZU_STATUS_OK) {
         zu_context_set_error(ctx, ZU_STATUS_IO, "write local header failed");
         return ZU_STATUS_IO;
+    }
+
+    if (header_zip64) {
+        uint16_t header_id = ZU_EXTRA_ZIP64;
+        uint16_t data_len = 16;
+        uint64_t sizes[2] = {0, 0};
+        if (zu_write_output(ctx, &header_id, 2) != ZU_STATUS_OK || zu_write_output(ctx, &data_len, 2) != ZU_STATUS_OK || zu_write_output(ctx, sizes, sizeof(sizes)) != ZU_STATUS_OK) {
+            zu_context_set_error(ctx, ZU_STATUS_IO, "write Zip64 extra failed");
+            return ZU_STATUS_IO;
+        }
     }
 
     zu_zipcrypto_ctx zc;
@@ -1144,7 +1157,7 @@ static int write_streaming_entry(ZContext* ctx,
         uint8_t header[12];
         for (int k = 0; k < 12; ++k)
             header[k] = (uint8_t)(rand() & 0xff);
-        header[11] = (uint8_t)(dos_time >> 8); /* bit 3 set: use mod_time high byte */
+        header[11] = (uint8_t)(dos_time >> 8);
         zu_zipcrypto_encrypt(&zc, header, 12);
         if (zu_write_output(ctx, header, 12) != ZU_STATUS_OK) {
             zu_context_set_error(ctx, ZU_STATUS_IO, "write encryption header failed");
@@ -1174,6 +1187,7 @@ static int write_streaming_entry(ZContext* ctx,
 
     int rc = ZU_STATUS_OK;
     bool prev_cr = false;
+
     if (!compress) {
         size_t got = 0;
         while ((got = fread(inbuf, 1, ZU_IO_CHUNK, src)) > 0) {
@@ -1311,7 +1325,7 @@ static int write_streaming_entry(ZContext* ctx,
                         zu_context_set_error(ctx, rc, "bzip2 compression failed");
                         break;
                     }
-                    size_t have = ZU_IO_CHUNK - strm.avail_out;
+                    size_t have = ZU_IO_CHUNK - (size_t)strm.avail_out;
                     if (have > 0) {
                         if (pzc) {
                             zu_zipcrypto_encrypt(pzc, outbuf, have);
@@ -1342,7 +1356,7 @@ static int write_streaming_entry(ZContext* ctx,
                         zu_context_set_error(ctx, rc, "bzip2 finish failed");
                         break;
                     }
-                    size_t have = ZU_IO_CHUNK - strm.avail_out;
+                    size_t have = ZU_IO_CHUNK - (size_t)strm.avail_out;
                     if (have > 0) {
                         if (pzc) {
                             zu_zipcrypto_encrypt(pzc, outbuf, have);
@@ -1374,7 +1388,7 @@ static int write_streaming_entry(ZContext* ctx,
         return rc;
     }
 
-    bool need_zip64 = comp_size >= zip64_trigger || uncomp_size >= zip64_trigger || *offset >= zip64_trigger;
+    bool need_zip64 = header_zip64 || comp_size >= zip64_trigger || uncomp_size >= zip64_trigger || *offset >= zip64_trigger;
     if (write_data_descriptor(ctx, crc, comp_size, uncomp_size, need_zip64) != ZU_STATUS_OK) {
         return ZU_STATUS_IO;
     }
@@ -1406,7 +1420,7 @@ static int write_streaming_entry(ZContext* ctx,
 
     log_entry_action(ctx, "adding", stored, method, comp_size, uncomp_size);
 
-    uint64_t header_len = sizeof(lho) + name_len + lho.extra_len;
+    uint64_t header_len = sizeof(lho) + name_len + extra_len;
     *offset += header_len + comp_size + desc_len;
     return ZU_STATUS_OK;
 }
@@ -1432,7 +1446,6 @@ static int write_stdin_staged_entry(ZContext* ctx,
 
     zu_input_info staged_info = *info;
     staged_info.size_known = true;
-    /* Treat staged stdin like a regular file so normal store heuristics apply in filter mode too. */
     staged_info.is_stdin = false;
     staged_info.st.st_size = (off_t)staged.size;
 
@@ -1460,7 +1473,6 @@ static int write_stdin_staged_entry(ZContext* ctx,
         uncomp_size = uncomp_tmp;
         comp_size = comp_tmp;
         payload = staged_comp;
-        /* Store instead of deflating when compression fails to shrink the data. */
         if (comp_size >= uncomp_size) {
             fclose(staged_comp);
             staged_comp = NULL;
@@ -1487,7 +1499,7 @@ static int write_stdin_staged_entry(ZContext* ctx,
     uint16_t int_attr = staged.is_text ? 1 : 0;
 
     size_t name_len = strlen(stored);
-    uint16_t extra_len = (uint16_t)(4 + 2 * sizeof(uint64_t)); /* Zip64 sizes */
+    uint16_t extra_len = (uint16_t)(4 + 2 * sizeof(uint64_t));
 
     zu_local_header lho = {
         .signature = ZU_SIG_LOCAL,
@@ -1594,14 +1606,9 @@ static int copy_existing_entry(ZContext* ctx, const zu_existing_entry* e, uint64
         return ZU_STATUS_IO;
     }
 
-    /* We need to copy LHO + name + extra + data.
-     * We know size of name/extra from LHO.
-     * We know size of data from CD entry (e->comp_size). */
-
     uint64_t header_len = sizeof(lho) + lho.name_len + lho.extra_len;
     uint64_t total_to_copy = header_len + e->comp_size;
 
-    /* Fast path: copy bytes verbatim when not stripping attributes */
     if (!ctx->exclude_extra_attrs) {
         if (fseeko(ctx->in_file, (off_t)e->lho_offset, SEEK_SET) != 0) {
             zu_context_set_error(ctx, ZU_STATUS_IO, "seek to old LHO start failed");
@@ -1633,14 +1640,12 @@ static int copy_existing_entry(ZContext* ctx, const zu_existing_entry* e, uint64
         return ZU_STATUS_OK;
     }
 
-    /* Attribute-stripping path: rewrite the header and filtered extras */
     size_t name_len = lho.name_len;
     size_t extra_len = lho.extra_len;
     char* name_buf = NULL;
     uint8_t* extra_buf = NULL;
     uint8_t* filtered_extra = NULL;
     uint8_t* buf = NULL;
-    bool filtered_alloc = false;
     int rc = ZU_STATUS_OK;
 
     if (name_len > 0) {
@@ -1670,7 +1675,6 @@ static int copy_existing_entry(ZContext* ctx, const zu_existing_entry* e, uint64
     }
 
     uint16_t filtered_len = (uint16_t)extra_len;
-    filtered_extra = extra_buf;
     if (extra_len > 0) {
         rc = filter_extra_for_exclude(extra_buf, (uint16_t)extra_len, &filtered_extra, &filtered_len);
         if (rc != ZU_STATUS_OK) {
@@ -1679,7 +1683,6 @@ static int copy_existing_entry(ZContext* ctx, const zu_existing_entry* e, uint64
             zu_context_set_error(ctx, rc, "filter extra failed");
             return rc;
         }
-        filtered_alloc = filtered_extra != extra_buf;
     }
 
     lho.extra_len = filtered_len;
@@ -1729,12 +1732,8 @@ static int copy_existing_entry(ZContext* ctx, const zu_existing_entry* e, uint64
 cleanup:
     free(buf);
     free(name_buf);
-    if (filtered_alloc && filtered_extra) {
-        free(filtered_extra);
-    }
-    if (extra_buf) {
-        free(extra_buf);
-    }
+    free(filtered_extra);
+    free(extra_buf);
     return rc;
 }
 
@@ -1818,6 +1817,7 @@ static int write_central_directory(ZContext* ctx, const zu_entry_list* entries, 
         }
         cd_size += sizeof(ch) + name_len + extra_len + comment_len;
     }
+
     if (cd_size > UINT32_MAX)
         needs_zip64 = true;
     if (cd_size_out)
@@ -1829,6 +1829,8 @@ static int write_central_directory(ZContext* ctx, const zu_entry_list* entries, 
 
 static int write_end_central(ZContext* ctx, const zu_entry_list* entries, uint64_t cd_offset, uint64_t cd_size, bool needs_zip64, const char* comment, uint16_t comment_len) {
     (void)ctx;
+    (void)needs_zip64;
+
     uint16_t disk_id = 0;
     uint16_t entry_count = entries->len > 0xffff ? 0xffff : (uint16_t)entries->len;
     zu_end_central endrec = {
@@ -1841,7 +1843,6 @@ static int write_end_central(ZContext* ctx, const zu_entry_list* entries, uint64
         .cd_offset = (cd_offset > UINT32_MAX) ? 0xffffffffu : (uint32_t)cd_offset,
         .comment_len = comment_len,
     };
-    /* Disk fields remain zeroed because multi-disk archives are not supported. */
 
     if (zu_write_output(ctx, &endrec, sizeof(endrec)) != ZU_STATUS_OK) {
         return ZU_STATUS_IO;
@@ -1858,19 +1859,21 @@ static int write_end_central64(ZContext* ctx, const zu_entry_list* entries, uint
     (void)ctx;
     uint32_t disk_count = 1;
     uint16_t disk_id = 0;
+
     uint16_t version_made = 45;
     for (size_t i = 0; i < entries->len; ++i) {
         if (entries->items[i].version_made > version_made) {
             version_made = entries->items[i].version_made;
         }
     }
+
     zu_end_central64 end64 = {
         .signature = ZU_SIG_END64,
         .size = (uint64_t)(sizeof(zu_end_central64) - 12),
         .version_made = version_made,
         .version_needed = 45,
         .disk_num = disk_id,
-        .disk_start = disk_id,  // Disk where CD starts
+        .disk_start = disk_id,
         .entries_disk = (uint64_t)entries->len,
         .entries_total = (uint64_t)entries->len,
         .cd_size = cd_size,
@@ -1879,9 +1882,10 @@ static int write_end_central64(ZContext* ctx, const zu_entry_list* entries, uint
     if (zu_write_output(ctx, &end64, sizeof(end64)) != ZU_STATUS_OK) {
         return ZU_STATUS_IO;
     }
+
     zu_end64_locator locator = {
         .signature = ZU_SIG_END64LOC,
-        .disk_num = disk_id,  // Disk where EOCD64 is
+        .disk_num = disk_id,
         .eocd64_offset = cd_offset + cd_size,
         .total_disks = disk_count,
     };
@@ -1899,13 +1903,13 @@ int zu_modify_archive(ZContext* ctx) {
     if (!ctx || !ctx->archive_path) {
         return ZU_STATUS_USAGE;
     }
+
     srand(time(NULL));
     ctx->current_offset = 0;
     char* temp_path = NULL;
     const char* target_path = ctx->output_path ? ctx->output_path : ctx->archive_path;
     int rc = ZU_STATUS_OK;
 
-    /* 1. Load existing archive if requested and it exists */
     bool existing_loaded = false;
     struct stat st;
     if (stat(ctx->archive_path, &st) == 0 && ctx->modify_archive) {
@@ -1922,7 +1926,6 @@ int zu_modify_archive(ZContext* ctx) {
         }
     }
 
-    /* Copy-only mode (-U/--copy) selects existing entries to copy to a new archive. */
     size_t copy_selected = 0;
     if (ctx->copy_mode) {
         if (!ctx->output_path) {
@@ -1944,21 +1947,15 @@ int zu_modify_archive(ZContext* ctx) {
         }
     }
 
-    /* 2. Process Input Files and Mark Changes */
-    /* If difference_mode, ctx->include contains items to delete.
-       Otherwise, ctx->include contains items to add/update. */
-
     size_t delete_selected = 0;
     if (ctx->difference_mode) {
         bool time_filter_applied = ctx->has_filter_before || ctx->has_filter_after;
-        /* Mark entries for deletion */
         for (size_t i = 0; i < ctx->include.len; ++i) {
             const char* pattern = ctx->include.items[i];
             for (size_t j = 0; j < ctx->existing_entries.len; ++j) {
                 zu_existing_entry* e = (zu_existing_entry*)ctx->existing_entries.items[j];
                 if (!e->delete && fnmatch(pattern, e->name, 0) == 0) {
                     if (time_filter_applied) {
-                        /* Upstream zip ignores -t/-tt in delete mode; mirror by treating as no-op. */
                         continue;
                     }
                     e->delete = true;
@@ -1977,44 +1974,25 @@ int zu_modify_archive(ZContext* ctx) {
         }
     }
     else if (!ctx->copy_mode) {
-        /* Add / Update Mode */
-
-        /* 2a. Expand directories if recursion enabled */
         if (zu_expand_args(ctx) != ZU_STATUS_OK) {
             return ZU_STATUS_OOM;
         }
 
-        /* 2b. File Sync (-FS) deletion pass */
         if (ctx->filesync) {
-            /* Sync mode: delete entries that are in archive but NOT on filesystem.
-               In standard zip, this scope is limited to the input arguments.
-               Since we expanded arguments, we can check against FS directly.
-               However, standard behavior is safer: Iterate existing entries, check if they exist on FS. */
             for (size_t i = 0; i < ctx->existing_entries.len; ++i) {
                 zu_existing_entry* e = (zu_existing_entry*)ctx->existing_entries.items[i];
                 if (e->delete)
                     continue;
 
-                /* Check if file exists */
-                struct stat st;
-                if (lstat(e->name, &st) != 0) {
-                    /* File missing, delete from archive */
+                struct stat st2;
+                if (lstat(e->name, &st2) != 0) {
                     e->delete = true;
                     e->changed = true;
                     log_delete_action(ctx, e->name);
                 }
             }
         }
-
-        /* For each file in include list, check if it exists in archive */
-        /* Note: This simplistic loop matches filenames. Ideally we map them. */
-
-        /* We are not updating existing_entries structures with new data here.
-           Instead, we will build a separate list of "files to write".
-           But we need to know if we should skip writing a file because the existing one is newer (-f/-u). */
     }
-
-    /* 3. Open Output */
 
     if (!ctx->dry_run) {
         if (ctx->output_to_stdout) {
@@ -2045,36 +2023,33 @@ int zu_modify_archive(ZContext* ctx) {
         added = copy_selected;
     }
 
-    /* 4. Write Entries */
-
-    /* 4a. Write New/Updated Files (unless delete mode) */
     if (!ctx->difference_mode && !ctx->copy_mode) {
         for (size_t i = 0; i < ctx->include.len; ++i) {
             const char* path = ctx->include.items[i];
-            /* Exclude/include pattern filtering */
+
             if (!zu_should_include(ctx, path)) {
                 if (ctx->verbose || ctx->log_info || ctx->dry_run)
                     zu_log(ctx, "skipping %s (excluded)\n", path);
                 continue;
             }
+
             const char* stored = ctx->store_paths ? path : basename_component(path);
             char* allocated = NULL;
             const char* entry_name = stored;
 
-            /* Perform Update/Freshen Checks */
             zu_input_info info;
             if (describe_input(ctx, path, &info) != ZU_STATUS_OK) {
-                /* If file not found, skip with warning (standard zip behavior). */
                 if (ctx->verbose || ctx->log_info || ctx->dry_run)
                     zu_log(ctx, "zip: %s not found or not readable\n", path);
                 continue;
             }
             bool is_symlink = info.is_symlink;
 
-            /* If directory, ensure entry name ends with '/' */
             if (S_ISDIR(info.st.st_mode)) {
                 if (ctx->no_dir_entries) {
                     free(allocated);
+                    if (info.link_target)
+                        free(info.link_target);
                     continue;
                 }
                 size_t len = strlen(stored);
@@ -2083,6 +2058,8 @@ int zu_modify_archive(ZContext* ctx) {
                     if (!allocated) {
                         zu_context_set_error(ctx, ZU_STATUS_OOM, "out of memory");
                         rc = ZU_STATUS_OOM;
+                        if (info.link_target)
+                            free(info.link_target);
                         goto cleanup;
                     }
                     memcpy(allocated, stored, len);
@@ -2092,7 +2069,6 @@ int zu_modify_archive(ZContext* ctx) {
                 }
             }
 
-            /* Check if this file replaces an existing one */
             zu_existing_entry* existing = NULL;
             if (existing_loaded) {
                 for (size_t j = 0; j < ctx->existing_entries.len; ++j) {
@@ -2104,7 +2080,6 @@ int zu_modify_archive(ZContext* ctx) {
                 }
             }
 
-            /* Time Filtering */
             if (ctx->has_filter_after && info.st.st_mtime < ctx->filter_after) {
                 if (ctx->verbose || ctx->log_info || ctx->dry_run)
                     zu_log(ctx, "skipping %s (older than -t)\n", path);
@@ -2124,18 +2099,15 @@ int zu_modify_archive(ZContext* ctx) {
 
             if (existing) {
                 if (ctx->freshen || ctx->update) {
-                    /* Compare times */
                     uint16_t dos_time = 0, dos_date = 0;
                     msdos_datetime(&info.st, &dos_time, &dos_date);
 
-                    /* Simple comparison (this ignores high-res timestamps for now) */
                     bool input_newer = true;
                     if (dos_date < existing->hdr.mod_date || (dos_date == existing->hdr.mod_date && dos_time <= existing->hdr.mod_time)) {
                         input_newer = false;
                     }
 
                     if (!input_newer) {
-                        /* Input is older or same, skip it. Keep existing. */
                         if (ctx->verbose || ctx->log_info || ctx->dry_run)
                             zu_log(ctx, "skipping %s (not newer)\n", path);
                         if (info.link_target)
@@ -2144,7 +2116,6 @@ int zu_modify_archive(ZContext* ctx) {
                         continue;
                     }
                 }
-                /* We are replacing existing. Mark it for deletion. */
                 existing->delete = true;
                 existing->changed = true;
                 if (ctx->verbose || ctx->log_info || ctx->dry_run)
@@ -2152,9 +2123,7 @@ int zu_modify_archive(ZContext* ctx) {
                 added++;
             }
             else {
-                /* New file */
                 if (ctx->freshen) {
-                    /* Freshen only updates existing. Skip new. */
                     if (info.link_target)
                         free(info.link_target);
                     free(allocated);
@@ -2165,8 +2134,6 @@ int zu_modify_archive(ZContext* ctx) {
                 added++;
             }
 
-            /* Proceed to write this file */
-            /* Copy-paste from original writer loop */
             uint16_t dos_time = 0, dos_date = 0;
             msdos_datetime(&info.st, &dos_time, &dos_date);
 
@@ -2191,9 +2158,10 @@ int zu_modify_archive(ZContext* ctx) {
                 if (info.st.st_size == 0)
                     compress = false;
                 if (is_symlink) {
-                    compress = false; /* Store symlinks as links, not targets */
+                    compress = false;
                 }
             }
+
             const char* prefix = ctx->dry_run ? "plan" : (existing ? "updating" : "adding");
             const char* method_desc = compress ? compression_method_name(ctx->compression_method) : "store";
             if (ctx->verbose || ctx->log_info || ctx->dry_run) {
@@ -2207,7 +2175,6 @@ int zu_modify_archive(ZContext* ctx) {
                 continue;
             }
 
-            /* Record the disk/offset where this entry's local header begins before any writes */
             uint32_t entry_disk_start = current_disk_index(ctx);
             uint64_t entry_lho_offset = ctx->current_offset;
 
@@ -2237,9 +2204,10 @@ int zu_modify_archive(ZContext* ctx) {
             if (S_ISDIR(info.st.st_mode)) {
                 if (!ctx->store_paths) {
                     free(allocated);
-                    continue; /* -j: skip directory entries */
+                    if (info.link_target)
+                        free(info.link_target);
+                    continue;
                 }
-                /* Directories have zero size, no CRC, store method */
                 crc = 0;
                 uncomp_size = 0;
                 comp_size = 0;
@@ -2252,7 +2220,6 @@ int zu_modify_archive(ZContext* ctx) {
 
                 if (compress) {
                     rc = compress_to_temp(ctx, path, method, ctx->compression_level, &staged, &crc, &uncomp_size, &comp_size);
-                    /* Fall back to storing when compression is not effective. */
                     if (rc == ZU_STATUS_OK && comp_size >= uncomp_size) {
                         fclose(staged);
                         staged = NULL;
@@ -2270,6 +2237,7 @@ int zu_modify_archive(ZContext* ctx) {
                     rc = compute_crc_and_size(ctx, path, &crc, &uncomp_size);
                     comp_size = uncomp_size;
                 }
+
                 if (rc != ZU_STATUS_OK) {
                     if (staged)
                         fclose(staged);
@@ -2293,7 +2261,7 @@ int zu_modify_archive(ZContext* ctx) {
             size_t name_len = strlen(entry_name);
 
             uint32_t ext_attr = 0;
-            uint16_t version_made = 20; /* Default: FAT/DOS, version 2.0 */
+            uint16_t version_made = 20;
             make_attrs(ctx, &info.st, S_ISDIR(info.st.st_mode), &ext_attr, &version_made);
             if (zip64_lho) {
                 version_made = (uint16_t)((version_made & 0xff00u) | 45);
@@ -2318,18 +2286,22 @@ int zu_modify_archive(ZContext* ctx) {
                 rc = ZU_STATUS_IO;
                 if (staged)
                     fclose(staged);
+                if (info.link_target)
+                    free(info.link_target);
                 goto cleanup;
             }
 
             if (zip64_lho) {
-                uint16_t header_id = ZU_EXTRA_ZIP64;
-                uint16_t data_len = 16;
-                uint64_t sizes[2] = {uncomp_size, comp_size};
-                if (zu_write_output(ctx, &header_id, 2) != ZU_STATUS_OK || zu_write_output(ctx, &data_len, 2) != ZU_STATUS_OK || zu_write_output(ctx, sizes, 16) != ZU_STATUS_OK) {
+                uint16_t header_id2 = ZU_EXTRA_ZIP64;
+                uint16_t data_len2 = 16;
+                uint64_t sizes2[2] = {uncomp_size, comp_size};
+                if (zu_write_output(ctx, &header_id2, 2) != ZU_STATUS_OK || zu_write_output(ctx, &data_len2, 2) != ZU_STATUS_OK || zu_write_output(ctx, sizes2, 16) != ZU_STATUS_OK) {
                     zu_context_set_error(ctx, ZU_STATUS_IO, "write Zip64 extra failed");
                     rc = ZU_STATUS_IO;
                     if (staged)
                         fclose(staged);
+                    if (info.link_target)
+                        free(info.link_target);
                     goto cleanup;
                 }
             }
@@ -2347,6 +2319,8 @@ int zu_modify_archive(ZContext* ctx) {
                     rc = ZU_STATUS_IO;
                     if (staged)
                         fclose(staged);
+                    if (info.link_target)
+                        free(info.link_target);
                     goto cleanup;
                 }
             }
@@ -2367,19 +2341,21 @@ int zu_modify_archive(ZContext* ctx) {
                 }
             }
             else {
-                /* Directory has no data to write */
                 if (staged)
                     fclose(staged);
             }
+
             if (ctx->remove_source && !info.is_stdin) {
                 unlink(path);
             }
+
             if (ensure_entry_capacity(&entries) != ZU_STATUS_OK) {
                 rc = ZU_STATUS_OOM;
                 if (info.link_target)
                     free(info.link_target);
                 goto cleanup;
             }
+
             entries.items[entries.len].name = strdup(entry_name);
             entries.items[entries.len].crc32 = crc;
             entries.items[entries.len].comp_size = comp_size;
@@ -2400,6 +2376,8 @@ int zu_modify_archive(ZContext* ctx) {
                 entries.items[entries.len].comment = malloc(existing->comment_len);
                 if (!entries.items[entries.len].comment) {
                     rc = ZU_STATUS_OOM;
+                    if (info.link_target)
+                        free(info.link_target);
                     goto cleanup;
                 }
                 memcpy(entries.items[entries.len].comment, existing->comment, existing->comment_len);
@@ -2430,7 +2408,6 @@ int zu_modify_archive(ZContext* ctx) {
         }
     }
 
-    /* Check if any files were added/updated or metadata changed */
     if (added == 0 && !ctx->difference_mode && !existing_changes && !ctx->zip_comment_specified && !ctx->set_archive_mtime) {
         rc = ZU_STATUS_NO_FILES;
         if (!ctx->quiet && target_path && !ctx->update && !ctx->freshen) {
@@ -2445,25 +2422,19 @@ int zu_modify_archive(ZContext* ctx) {
         goto cleanup;
     }
 
-    /* 4b. Write Kept Existing Entries */
     if (existing_loaded) {
         for (size_t i = 0; i < ctx->existing_entries.len; ++i) {
             zu_existing_entry* e = (zu_existing_entry*)ctx->existing_entries.items[i];
             if (!e->delete) {
-                /* Copy entry */
                 uint64_t written = 0;
-                /* Before copying, we must temporarily update e->lho_offset in our struct
-                   to be the NEW offset? No, we need old offset to read, but we need to
-                   record NEW offset for the new CD.
-                   Wait, copy_existing_entry uses e->lho_offset to READ.
-                   So we must not change e->lho_offset before calling it. */
-
                 uint64_t new_offset = offset;
                 uint32_t entry_disk_start = current_disk_index(ctx);
                 uint64_t entry_lho_offset = ctx->current_offset;
+
                 if (ctx->copy_mode && !ctx->quiet) {
                     progress_log(ctx, " copying: %s\n", e->name);
                 }
+
                 rc = copy_existing_entry(ctx, e, &written);
                 if (rc != ZU_STATUS_OK)
                     goto cleanup;
@@ -2472,6 +2443,7 @@ int zu_modify_archive(ZContext* ctx) {
                     rc = ZU_STATUS_OOM;
                     goto cleanup;
                 }
+
                 entries.items[entries.len].name = strdup(e->name);
                 entries.items[entries.len].crc32 = e->hdr.crc32;
                 entries.items[entries.len].comp_size = e->comp_size;
@@ -2480,17 +2452,19 @@ int zu_modify_archive(ZContext* ctx) {
                 entries.items[entries.len].method = e->hdr.method;
                 entries.items[entries.len].mod_time = e->hdr.mod_time;
                 entries.items[entries.len].mod_date = e->hdr.mod_date;
+
                 uint32_t ext_attr = ctx->exclude_extra_attrs ? 0 : e->hdr.ext_attr;
                 uint16_t version_made = ctx->exclude_extra_attrs ? (uint16_t)(e->hdr.version_made & 0x00ffu) : e->hdr.version_made;
+
                 entries.items[entries.len].ext_attr = ext_attr;
                 entries.items[entries.len].version_made = version_made;
                 entries.items[entries.len].int_attr = e->hdr.int_attr;
-                /* Logic to detect zip64 from existing data */
                 entries.items[entries.len].zip64 = (e->comp_size >= 0xffffffffu || e->uncomp_size >= 0xffffffffu || new_offset >= 0xffffffffu);
                 entries.items[entries.len].flags = e->hdr.flags;
                 entries.items[entries.len].disk_start = entry_disk_start;
                 entries.items[entries.len].comment = NULL;
                 entries.items[entries.len].comment_len = 0;
+
                 if (e->comment && e->comment_len > 0) {
                     entries.items[entries.len].comment = malloc(e->comment_len);
                     if (!entries.items[entries.len].comment) {
@@ -2500,6 +2474,7 @@ int zu_modify_archive(ZContext* ctx) {
                     memcpy(entries.items[entries.len].comment, e->comment, e->comment_len);
                     entries.items[entries.len].comment_len = e->comment_len;
                 }
+
                 entries.len++;
 
                 offset += written;
@@ -2508,7 +2483,6 @@ int zu_modify_archive(ZContext* ctx) {
         }
     }
 
-    /* 5. Write Central Directory */
     uint64_t cd_offset = ctx->current_offset;
     uint64_t cd_size = 0;
     bool need_zip64 = false;
@@ -2530,9 +2504,11 @@ int zu_modify_archive(ZContext* ctx) {
 
 cleanup:
     free_entries(&entries);
+
     if (ctx->out_file && ctx->out_file != stdout)
         fclose(ctx->out_file);
     ctx->out_file = NULL;
+
     if (ctx->in_file)
         fclose(ctx->in_file);
     ctx->in_file = NULL;
@@ -2543,6 +2519,7 @@ cleanup:
             rc = ZU_STATUS_IO;
         }
     }
+
     if (rc == ZU_STATUS_OK && ctx->set_archive_mtime && ctx->newest_mtime_valid && !ctx->output_to_stdout) {
         if (apply_mtime(target_path, ctx->newest_mtime) != 0) {
             zu_context_set_error(ctx, ZU_STATUS_IO, "failed to set archive mtime");
@@ -2554,6 +2531,5 @@ cleanup:
     }
 
     free(temp_path);
-
     return rc;
 }
