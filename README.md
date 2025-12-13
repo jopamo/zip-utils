@@ -25,6 +25,17 @@ meson setup build-sanitize -Ddebug_sanitize=true
 ninja -C build-sanitize
 ```
 
+For optimized release binaries, use a dedicated dir with LTO and higher optimization:
+```bash
+meson setup build-release --buildtype=release -Doptimization=3 -Db_lto=true
+ninja -C build-release
+```
+Optionally add `-Dstrip=true`, `-Db_pie=true`, or `-Dcpp_args=-march=native` when portability is not a concern.
+
+Performance shortcuts:
+- `ZU_FAST_WRITE=0` disables the default fast-write heuristics (streaming + small-file fast compression).
+- `ZU_FAST_WRITE_THRESHOLD=<bytes>` tunes the small-file fast-write cutoff (default 524288).
+
 ## Usage Examples
 - Create an archive: `build/zip out.zip file1.txt dir/`
 - List contents: `build/unzip -l out.zip`

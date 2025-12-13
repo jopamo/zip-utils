@@ -1199,11 +1199,9 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
         comp_size -= 12;
     }
 
-    uint8_t* in_buf = malloc(ZU_IO_CHUNK);
-    uint8_t* out_buf = malloc(ZU_IO_CHUNK);
+    uint8_t* in_buf = zu_get_io_buffer(ctx, ZU_IO_CHUNK);
+    uint8_t* out_buf = zu_get_io_buffer2(ctx, ZU_IO_CHUNK);
     if (!in_buf || !out_buf) {
-        free(in_buf);
-        free(out_buf);
         zu_context_set_error(ctx, ZU_STATUS_OOM, "allocating buffers failed");
         return ZU_STATUS_OOM;
     }
@@ -1221,15 +1219,11 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
         else {
             out_path = build_output_path(ctx, name);
             if (!out_path) {
-                free(in_buf);
-                free(out_buf);
                 zu_context_set_error(ctx, ZU_STATUS_OOM, "allocating output path failed");
                 return ZU_STATUS_OOM;
             }
 
             if (ensure_parent_dirs(out_path) != ZU_STATUS_OK) {
-                free(out_buf);
-                free(in_buf);
                 free(out_path);
                 zu_context_set_error(ctx, ZU_STATUS_IO, "creating parent directories failed");
                 return ZU_STATUS_IO;
@@ -1237,8 +1231,6 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
 
             fp = fopen(out_path, "wb");
             if (!fp) {
-                free(out_buf);
-                free(in_buf);
                 free(out_path);
                 zu_context_set_error(ctx, ZU_STATUS_IO, "open output file failed");
                 return ZU_STATUS_IO;
@@ -1467,8 +1459,6 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
     }
 
     free(out_path);
-    free(out_buf);
-    free(in_buf);
 
     if (rc != ZU_STATUS_OK)
         return rc;

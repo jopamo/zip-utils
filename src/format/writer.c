@@ -18,6 +18,10 @@
 #include <unistd.h>
 #include <zlib.h>
 #include <fnmatch.h>
+#include <fcntl.h>
+#ifdef __linux__
+#include <sys/sendfile.h>
+#endif
 
 #ifndef FNM_CASEFOLD
 #define FNM_CASEFOLD 0
@@ -445,7 +449,29 @@ static bool should_compress_file(ZContext* ctx, const zu_input_info* info, const
     if (path && should_store_by_suffix(ctx, path)) {
         return false;
     }
+    if (ctx->fast_write && info && info->size_known) {
+        /* Store tiny files to avoid deflate setup overhead in fast mode */
+        if ((uint64_t)info->st.st_size <= (uint64_t)32 * 1024) {
+            return false;
+        }
+        if (ctx->compression_level <= 1 && (uint64_t)info->st.st_size >= (uint64_t)64 * 1024) {
+            return false; /* fast-write level 0/1: store larger incompressible candidates */
+        }
+    }
     return true;
+}
+
+static int effective_deflate_level(const ZContext* ctx) {
+    if (!ctx)
+        return Z_DEFAULT_COMPRESSION;
+    int lvl = (ctx->compression_level < 0 || ctx->compression_level > 9) ? Z_DEFAULT_COMPRESSION : ctx->compression_level;
+    if (ctx->fast_write) {
+        if (lvl <= 1)
+            return 1;
+        if (lvl > 3)
+            return 3;
+    }
+    return lvl;
 }
 
 static void progress_log(ZContext* ctx, const char* fmt, ...) {
@@ -627,7 +653,7 @@ static int compute_crc_and_size(ZContext* ctx, const char* path, uint32_t* crc_o
         return ZU_STATUS_IO;
     }
 
-    uint8_t* buf = malloc(ZU_IO_CHUNK);
+    uint8_t* buf = zu_get_io_buffer(ctx, ZU_IO_CHUNK);
     if (!buf) {
         fclose(fp);
         zu_context_set_error(ctx, ZU_STATUS_OOM, "allocating read buffer failed");
@@ -646,12 +672,10 @@ static int compute_crc_and_size(ZContext* ctx, const char* path, uint32_t* crc_o
         char msg[128];
         snprintf(msg, sizeof(msg), "read '%s' failed", path);
         zu_context_set_error(ctx, ZU_STATUS_IO, msg);
-        free(buf);
         fclose(fp);
         return ZU_STATUS_IO;
     }
 
-    free(buf);
     fclose(fp);
     if (crc_out)
         *crc_out = crc;
@@ -680,11 +704,9 @@ static int compress_to_temp(ZContext* ctx, const char* path, int method, int lev
         return ZU_STATUS_IO;
     }
 
-    uint8_t* inbuf = malloc(ZU_IO_CHUNK);
-    uint8_t* outbuf = malloc(ZU_IO_CHUNK);
+    uint8_t* inbuf = zu_get_io_buffer(ctx, ZU_IO_CHUNK);
+    uint8_t* outbuf = zu_get_io_buffer2(ctx, ZU_IO_CHUNK);
     if (!inbuf || !outbuf) {
-        free(inbuf);
-        free(outbuf);
         fclose(in);
         fclose(tmp);
         zu_context_set_error(ctx, ZU_STATUS_OOM, "allocating compression buffers failed");
@@ -699,7 +721,7 @@ static int compress_to_temp(ZContext* ctx, const char* path, int method, int lev
     if (method == 8) { /* Deflate */
         z_stream strm;
         memset(&strm, 0, sizeof(strm));
-        int lvl = (level < 0 || level > 9) ? Z_DEFAULT_COMPRESSION : level;
+        int lvl = effective_deflate_level(ctx);
         int zrc = deflateInit2(&strm, lvl, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY);
         if (zrc != Z_OK) {
             rc = ZU_STATUS_IO;
@@ -824,8 +846,6 @@ static int compress_to_temp(ZContext* ctx, const char* path, int method, int lev
     }
 
 comp_done:
-    free(inbuf);
-    free(outbuf);
     fclose(in);
     if (rc != ZU_STATUS_OK) {
         fclose(tmp);
@@ -865,7 +885,7 @@ static int write_file_data(ZContext* ctx, const char* path, FILE* staged, uint64
         zu_context_set_error(ctx, ZU_STATUS_IO, msg);
         return ZU_STATUS_IO;
     }
-    uint8_t* buf = malloc(ZU_IO_CHUNK);
+    uint8_t* buf = zu_get_io_buffer(ctx, ZU_IO_CHUNK);
     if (!buf) {
         if (!staged)
             fclose(src);
@@ -879,7 +899,6 @@ static int write_file_data(ZContext* ctx, const char* path, FILE* staged, uint64
             zu_zipcrypto_encrypt(zc, buf, got);
         }
         if (zu_write_output(ctx, buf, got) != ZU_STATUS_OK) {
-            free(buf);
             if (!staged)
                 fclose(src);
             return ZU_STATUS_IO;
@@ -888,12 +907,10 @@ static int write_file_data(ZContext* ctx, const char* path, FILE* staged, uint64
     }
     if (ferror(src)) {
         zu_context_set_error(ctx, ZU_STATUS_IO, "read failed while writing output");
-        free(buf);
         if (!staged)
             fclose(src);
         return ZU_STATUS_IO;
     }
-    free(buf);
     if (!staged)
         fclose(src);
     if (expected_size != UINT64_MAX && written != expected_size) {
@@ -975,6 +992,55 @@ static void free_stdin_stage(zu_stdin_stage* staged) {
     staged->is_text = false;
 }
 
+static int copy_fast_path(ZContext* ctx, uint64_t start_offset, uint64_t total_len, uint64_t* written_out) {
+#ifdef __linux__
+    if (!ctx || !ctx->in_file || !ctx->out_file)
+        return ZU_STATUS_USAGE;
+
+    int infd = fileno(ctx->in_file);
+    int outfd = fileno(ctx->out_file);
+    if (infd < 0 || outfd < 0)
+        return ZU_STATUS_NOT_IMPLEMENTED;
+
+    if (fflush(ctx->out_file) != 0)
+        return ZU_STATUS_IO;
+
+    off_t in_off = (off_t)start_offset;
+    off_t out_start = lseek(outfd, 0, SEEK_CUR);
+    if (out_start < 0)
+        return ZU_STATUS_NOT_IMPLEMENTED;
+
+    uint64_t remaining = total_len;
+    while (remaining > 0) {
+        size_t to_copy = remaining > (uint64_t)SSIZE_MAX ? (size_t)SSIZE_MAX : (size_t)remaining;
+        ssize_t sent = sendfile(outfd, infd, &in_off, to_copy);
+        if (sent < 0) {
+            if (errno == ENOSYS || errno == EINVAL || errno == EXDEV)
+                return ZU_STATUS_NOT_IMPLEMENTED;
+            zu_context_set_error(ctx, ZU_STATUS_IO, "sendfile failed");
+            return ZU_STATUS_IO;
+        }
+        remaining -= (uint64_t)sent;
+        ctx->current_offset += (uint64_t)sent;
+    }
+
+    if (fseeko(ctx->out_file, (off_t)ctx->current_offset, SEEK_SET) != 0)
+        return ZU_STATUS_IO;
+    if (fseeko(ctx->in_file, in_off, SEEK_SET) != 0)
+        return ZU_STATUS_IO;
+
+    if (written_out)
+        *written_out = total_len;
+    return ZU_STATUS_OK;
+#else
+    (void)ctx;
+    (void)start_offset;
+    (void)total_len;
+    (void)written_out;
+    return ZU_STATUS_NOT_IMPLEMENTED;
+#endif
+}
+
 static int stage_stdin_to_temp(ZContext* ctx, zu_stdin_stage* staged) {
     if (!ctx || !staged) {
         return ZU_STATUS_USAGE;
@@ -1005,7 +1071,7 @@ static int stage_stdin_to_temp(ZContext* ctx, zu_stdin_stage* staged) {
         return ZU_STATUS_IO;
     }
 
-    uint8_t* buf = malloc(ZU_IO_CHUNK);
+    uint8_t* buf = zu_get_io_buffer(ctx, ZU_IO_CHUNK);
     if (!buf) {
         fclose(fp);
         unlink(tmpl);
@@ -1064,7 +1130,6 @@ static int stage_stdin_to_temp(ZContext* ctx, zu_stdin_stage* staged) {
         zu_context_set_error(ctx, rc, "rewind stdin temp failed");
     }
 
-    free(buf);
     if (rc != ZU_STATUS_OK) {
         fclose(fp);
         unlink(tmpl);
@@ -1175,11 +1240,9 @@ static int write_streaming_entry(ZContext* ctx,
         return ZU_STATUS_IO;
     }
 
-    uint8_t* inbuf = malloc(ZU_IO_CHUNK);
-    uint8_t* outbuf = compress ? malloc(ZU_IO_CHUNK) : NULL;
+    uint8_t* inbuf = zu_get_io_buffer(ctx, ZU_IO_CHUNK);
+    uint8_t* outbuf = compress ? zu_get_io_buffer2(ctx, ZU_IO_CHUNK) : NULL;
     if (!inbuf || (compress && !outbuf)) {
-        free(inbuf);
-        free(outbuf);
         if (src != stdin)
             fclose(src);
         zu_context_set_error(ctx, ZU_STATUS_OOM, "allocating streaming buffers failed");
@@ -1222,7 +1285,7 @@ static int write_streaming_entry(ZContext* ctx,
     else if (method == 8) {
         z_stream strm;
         memset(&strm, 0, sizeof(strm));
-        int lvl = (ctx->compression_level < 0 || ctx->compression_level > 9) ? Z_DEFAULT_COMPRESSION : ctx->compression_level;
+        int lvl = effective_deflate_level(ctx);
         int zrc = deflateInit2(&strm, lvl, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY);
         if (zrc != Z_OK) {
             rc = ZU_STATUS_IO;
@@ -1382,9 +1445,6 @@ static int write_streaming_entry(ZContext* ctx,
     if (src != stdin) {
         fclose(src);
     }
-    free(inbuf);
-    free(outbuf);
-
     if (rc != ZU_STATUS_OK) {
         return rc;
     }
@@ -1433,6 +1493,7 @@ static int write_stdin_staged_entry(ZContext* ctx,
                                     uint16_t dos_date,
                                     uint64_t entry_lho_offset,
                                     uint32_t entry_disk_start,
+                                    uint64_t zip64_trigger,
                                     uint64_t* offset,
                                     zu_entry_list* entries) {
     if (!ctx || !stored || !info || !offset || !entries) {
@@ -1454,6 +1515,15 @@ static int write_stdin_staged_entry(ZContext* ctx,
     uint16_t method = compress ? ctx->compression_method : 0;
     if (method == 0) {
         compress = false;
+    }
+
+    if (compress && ctx->fast_write && (ctx->fast_write_threshold == 0 || staged.size <= ctx->fast_write_threshold)) {
+        int saved_line = ctx->line_mode;
+        ctx->line_mode = ZU_LINE_NONE;
+        int stream_rc = write_streaming_entry(ctx, staged.path, stored, &staged_info, dos_time, dos_date, entry_lho_offset, entry_disk_start, zip64_trigger, offset, entries);
+        ctx->line_mode = saved_line;
+        free_stdin_stage(&staged);
+        return stream_rc;
     }
 
     uint64_t uncomp_size = staged.size;
@@ -1611,30 +1681,34 @@ static int copy_existing_entry(ZContext* ctx, const zu_existing_entry* e, uint64
     uint64_t total_to_copy = header_len + e->comp_size;
 
     if (!ctx->exclude_extra_attrs) {
+        int fast_rc = copy_fast_path(ctx, e->lho_offset, total_to_copy, written_out);
+        if (fast_rc == ZU_STATUS_OK)
+            return ZU_STATUS_OK;
+        if (fast_rc != ZU_STATUS_NOT_IMPLEMENTED)
+            return fast_rc;
+
         if (fseeko(ctx->in_file, (off_t)e->lho_offset, SEEK_SET) != 0) {
             zu_context_set_error(ctx, ZU_STATUS_IO, "seek to old LHO start failed");
             return ZU_STATUS_IO;
         }
-        uint8_t* buf = malloc(ZU_IO_CHUNK);
+        uint8_t* buf = zu_get_io_buffer(ctx, ZU_IO_CHUNK);
         if (!buf)
             return ZU_STATUS_OOM;
+        (void)posix_fadvise(fileno(ctx->in_file), (off_t)e->lho_offset, (off_t)total_to_copy, POSIX_FADV_SEQUENTIAL);
 
         uint64_t remaining = total_to_copy;
         while (remaining > 0) {
             size_t to_read = remaining > ZU_IO_CHUNK ? ZU_IO_CHUNK : (size_t)remaining;
             size_t got = fread(buf, 1, to_read, ctx->in_file);
             if (got != to_read) {
-                free(buf);
                 zu_context_set_error(ctx, ZU_STATUS_IO, "short read during entry copy");
                 return ZU_STATUS_IO;
             }
             if (zu_write_output(ctx, buf, got) != ZU_STATUS_OK) {
-                free(buf);
                 return ZU_STATUS_IO;
             }
             remaining -= got;
         }
-        free(buf);
 
         if (written_out)
             *written_out = total_to_copy;
@@ -1704,7 +1778,7 @@ static int copy_existing_entry(ZContext* ctx, const zu_existing_entry* e, uint64
         goto cleanup;
     }
 
-    buf = malloc(ZU_IO_CHUNK);
+    buf = zu_get_io_buffer(ctx, ZU_IO_CHUNK);
     if (!buf) {
         rc = ZU_STATUS_OOM;
         zu_context_set_error(ctx, rc, "allocating copy buffer failed");
@@ -1731,7 +1805,6 @@ static int copy_existing_entry(ZContext* ctx, const zu_existing_entry* e, uint64
         *written_out = sizeof(lho) + name_len + filtered_len + e->comp_size;
 
 cleanup:
-    free(buf);
     free(name_buf);
     free(filtered_extra);
     free(extra_buf);
@@ -2185,7 +2258,7 @@ int zu_modify_archive(ZContext* ctx) {
 
             if (streaming) {
                 if (info.is_stdin) {
-                    rc = write_stdin_staged_entry(ctx, entry_name, &info, dos_time, dos_date, entry_lho_offset, entry_disk_start, &offset, &entries);
+                    rc = write_stdin_staged_entry(ctx, entry_name, &info, dos_time, dos_date, entry_lho_offset, entry_disk_start, zip64_trigger, &offset, &entries);
                 }
                 else {
                     rc = write_streaming_entry(ctx, path, entry_name, &info, dos_time, dos_date, entry_lho_offset, entry_disk_start, zip64_trigger, &offset, &entries);

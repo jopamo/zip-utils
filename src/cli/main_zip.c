@@ -647,6 +647,9 @@ static void print_usage(FILE* to, const char* argv0) {
     zu_cli_print_opt(to, "-o", "Set archive mtime to newest entry");
     zu_cli_print_opt(to, "-", "Use stdout for output or stdin for input");
 
+    zu_cli_print_section(to, "Performance");
+    zu_cli_print_opt(to, "--fast-write[=bytes]", "Skip pre-compress size check; optional threshold (default 512KiB)");
+
     zu_cli_print_section(to, "Text Processing");
     zu_cli_print_opt(to, "-l", "Translate LF to CRLF");
     zu_cli_print_opt(to, "-ll", "Translate CRLF to LF");
@@ -980,6 +983,20 @@ static int parse_long_option(const char* tok, int argc, char** argv, int* idx, Z
     if (strcmp(name, "li") == 0 || strcmp(name, "log-info") == 0) {
         ctx->log_info = true;
         zu_trace_option(ctx, "--log-info");
+        return ZU_STATUS_OK;
+    }
+    if (strcmp(name, "fast-write") == 0) {
+        if (value) {
+            ctx->fast_write_threshold = strtoull(value, NULL, 10);
+        }
+        ctx->fast_write = true;
+        zu_trace_option(ctx, "--fast-write%s", value ? value : "");
+        return ZU_STATUS_OK;
+    }
+    if (strcmp(name, "fast-write-threshold") == 0) {
+        REQUIRE_ARG("--fast-write-threshold");
+        ctx->fast_write_threshold = strtoull(value, NULL, 10);
+        zu_trace_option(ctx, "--fast-write-threshold=%s", value);
         return ZU_STATUS_OK;
     }
     if (strcmp(name, "filesync") == 0 || strcmp(name, "FS") == 0) {

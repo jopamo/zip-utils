@@ -156,6 +156,7 @@ int zu_open_input(ZContext* ctx, const char* path) {
         zu_context_set_error(ctx, ZU_STATUS_IO, buf);
         return ZU_STATUS_IO;
     }
+    setvbuf(ctx->in_file, NULL, _IOFBF, 64 * 1024);
 
     return ZU_STATUS_OK;
 }
@@ -183,6 +184,7 @@ int zu_open_output(ZContext* ctx, const char* path, const char* mode) {
         zu_context_set_error(ctx, ZU_STATUS_IO, buf);
         return ZU_STATUS_IO;
     }
+    setvbuf(ctx->out_file, NULL, _IOFBF, 64 * 1024);
 
     return ZU_STATUS_OK;
 }

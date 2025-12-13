@@ -41,10 +41,14 @@ struct ZContext {
     uint64_t current_offset;
     uint8_t* io_buffer;
     size_t io_buffer_size;
+    uint8_t* io_buffer2;
+    size_t io_buffer2_size;
 
     /* Configuration */
     int compression_level;  /* 0-9 */
     int compression_method; /* 8=deflate, 12=bzip2 */
+    bool fast_write;        /* Skip temp compress/store decision */
+    uint64_t fast_write_threshold;
     bool recursive;
     bool recurse_from_cwd; /* -R */
     bool store_paths;
@@ -143,5 +147,7 @@ void zu_context_set_error(ZContext* ctx, int status, const char* msg);
 void zu_log(ZContext* ctx, const char* fmt, ...);
 void zu_warn_once(ZContext* ctx, const char* msg);
 void zu_trace_option(ZContext* ctx, const char* fmt, ...);
+uint8_t* zu_get_io_buffer(ZContext* ctx, size_t need);
+uint8_t* zu_get_io_buffer2(ZContext* ctx, size_t need);
 
 #endif

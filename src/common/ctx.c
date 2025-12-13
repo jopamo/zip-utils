@@ -5,6 +5,32 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+
+#define ZU_DEFAULT_FAST_WRITE_THRESHOLD (512 * 1024)
+
+static bool env_truthy(const char* v) {
+    if (!v || *v == '\0')
+        return false;
+    return !(strcmp(v, "0") == 0 || strcasecmp(v, "false") == 0 || strcasecmp(v, "off") == 0);
+}
+
+static bool env_truthy_default_true(const char* v) {
+    if (!v || *v == '\0')
+        return true;
+    return env_truthy(v);
+}
+
+static uint64_t parse_u64_env(const char* v, uint64_t fallback) {
+    if (!v || *v == '\0')
+        return fallback;
+    char* end = NULL;
+    unsigned long long val = strtoull(v, &end, 10);
+    if (end && *end == '\0' && val > 0) {
+        return (uint64_t)val;
+    }
+    return fallback;
+}
 
 /*
  * ZContext lifecycle and shared state management
@@ -42,6 +68,8 @@ ZContext* zu_context_create(void) {
     ctx->compression_method = 8;
     ctx->store_paths = true;
     ctx->recurse_from_cwd = false;
+    ctx->fast_write = env_truthy_default_true(getenv("ZU_FAST_WRITE"));
+    ctx->fast_write_threshold = parse_u64_env(getenv("ZU_FAST_WRITE_THRESHOLD"), ZU_DEFAULT_FAST_WRITE_THRESHOLD);
     ctx->match_case = true;
 
     /*
@@ -52,6 +80,8 @@ ZContext* zu_context_create(void) {
     ctx->last_error = ZU_STATUS_OK;
     ctx->io_buffer_size = 0;
     ctx->io_buffer = NULL;
+    ctx->io_buffer2_size = 0;
+    ctx->io_buffer2 = NULL;
 
     /*
      * Output and verbosity defaults
@@ -200,6 +230,7 @@ void zu_context_free(ZContext* ctx) {
     zu_strlist_free_with_dtor(&ctx->existing_entries, zu_existing_entry_free);
 
     free(ctx->io_buffer);
+    free(ctx->io_buffer2);
     free(ctx->zip_comment);
     free(ctx->temp_dir);
     free(ctx->password);
@@ -294,4 +325,30 @@ void zu_trace_option(ZContext* ctx, const char* fmt, ...) {
     va_end(args);
 
     zu_strlist_push(&ctx->option_events, buf);
+}
+
+static uint8_t* ensure_buffer(uint8_t** buf, size_t* cur, size_t need) {
+    if (!buf || !cur)
+        return NULL;
+    if (*cur < need) {
+        uint8_t* p = realloc(*buf, need);
+        if (!p) {
+            return NULL;
+        }
+        *buf = p;
+        *cur = need;
+    }
+    return *buf;
+}
+
+uint8_t* zu_get_io_buffer(ZContext* ctx, size_t need) {
+    if (!ctx || need == 0)
+        return NULL;
+    return ensure_buffer(&ctx->io_buffer, &ctx->io_buffer_size, need);
+}
+
+uint8_t* zu_get_io_buffer2(ZContext* ctx, size_t need) {
+    if (!ctx || need == 0)
+        return NULL;
+    return ensure_buffer(&ctx->io_buffer2, &ctx->io_buffer2_size, need);
 }
