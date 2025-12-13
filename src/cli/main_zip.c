@@ -605,6 +605,14 @@ static int read_zip_comment(ZContext* ctx) {
 }
 
 /*
+ * Version output
+ * - Mirrored after typical Info-ZIP "zip -v" style behavior
+ */
+static void print_version(FILE* to) {
+    fprintf(to, "Zip 3.0 (zip-utils rewrite; Info-ZIP compatibility work in progress)\n");
+}
+
+/*
  * Print CLI usage
  * - This is the public interface users rely on
  * - Option grouping reflects parsing behavior in parse_zip_args
@@ -1344,6 +1352,15 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
     }
 
     /*
+     * Version-only mode: -v with no archive and no file operands prints version
+     * This matches Info-ZIP behavior where "zip -v" prints version and exits.
+     */
+    if (ctx->verbose && !ctx->archive_path && ctx->include.len == 0) {
+        ctx->version_only = true;
+        return ZU_STATUS_OK;
+    }
+
+    /*
      * If no archive argument was provided, decide whether to enter implicit filter mode
      *
      * - If stdin is a tty and there are no include operands, treat it as usage
@@ -1402,6 +1419,13 @@ int main(int argc, char** argv) {
             zu_cli_error(g_tool_name, "argument parsing failed: %s", zu_status_str(parse_rc));
         zu_context_free(ctx);
         return map_exit_code(parse_rc);
+    }
+
+    // Version-only mode
+    if (ctx->version_only) {
+        print_version(stdout);
+        zu_context_free(ctx);
+        return 0;
     }
 
     if (ctx->dry_run) {

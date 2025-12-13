@@ -501,7 +501,6 @@ static int deflate_outperforms_store(const ZContext* ctx, const zu_input_info* i
 }
 
 static bool should_compress_file(ZContext* ctx, const zu_input_info* info, const char* path) {
-    fprintf(stderr, "DEBUG should_compress: path=%s size=%ld fast_write=%d\n", path ? path : "(null)", info ? (long)info->st.st_size : -1, ctx ? ctx->fast_write : -1);
     if (!ctx) {
         return false;
     }
@@ -518,7 +517,7 @@ static bool should_compress_file(ZContext* ctx, const zu_input_info* info, const
         return false;
     }
     /* Store very small non-text files in fast-write mode to reduce overhead */
-    if (ctx->fast_write && info && info->size_known && (uint64_t)info->st.st_size <= (uint64_t)1 * 1024 && (!path || !file_is_likely_text(path))) {
+    if (ctx->fast_write && info && info->size_known && (uint64_t)info->st.st_size <= (uint64_t)512) {
         return false;
     }
     if (ctx->fast_write && info && info->size_known) {

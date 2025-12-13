@@ -1213,6 +1213,8 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
     char* out_path = NULL;
 
     if (!test_only) {
+        if (!ctx->quiet)
+            printf("  %s: %s\n", hdr->method == 8 ? "inflating" : "extracting", name);
         if (ctx->output_to_stdout) {
             fp = stdout;
         }

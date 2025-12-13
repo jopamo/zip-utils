@@ -136,6 +136,9 @@ struct ZContext {
     bool fix_fix_archive; /* -FF */
     bool copy_mode;       /* -U / --copy */
 
+    /* Version output */
+    bool version_only;
+
     /* Error reporting */
     int last_error;
     char error_msg[256];
