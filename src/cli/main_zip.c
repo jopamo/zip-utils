@@ -15,17 +15,51 @@
 #include "ziputils.h"
 #include "reader.h"
 
-/* Tracks which alias (zip/zipnote) was used so logs match the tool name. */
+/*
+ * CLI front-end for zip-compatible behavior and zipnote editing mode
+ *
+ * Responsibilities
+ * - Interpret Info-ZIP style flags and normalize them into ZContext fields
+ * - Support multiple entrypoints via argv0 (zip, zipnote, zipcloak) to match common tool layouts
+ * - Provide zipnote-style comment listing/editing using stdin/stdout streams
+ * - Emit compatibility warnings for stubbed or unsupported flags
+ * - Hand off archive creation/modification to the execution layer (zu_zip_run / zu_modify_archive)
+ *
+ * Non-goals
+ * - Performing compression and I/O directly here beyond simple stdin helpers
+ * - Guaranteeing complete Info-ZIP parity for every flag and formatting corner case
+ */
+
+/*
+ * Tool name used for diagnostics
+ * - Defaults to "zip"
+ * - Switched to "zipnote" when invoked as zipnote so warnings and errors match expectations
+ */
 static const char* g_tool_name = "zip";
 
 /* --- Helpers --- */
 
+/*
+ * Parse a date string used by -t and -tt style filters
+ *
+ * Supported inputs
+ * - YYYY-MM-DD
+ * - MMDDYYYY
+ *
+ * Output
+ * - Returns a local time_t via mktime using tm_isdst = -1 so the C library can resolve DST
+ * - Returns (time_t)-1 when parsing fails or the token does not consume the full input string
+ *
+ * Notes
+ * - Only basic day/month bounds are checked here, mktime performs additional normalization
+ * - This is intentionally strict about trailing characters to avoid surprising filters
+ */
 static time_t parse_date(const char* str) {
     struct tm tm = {0};
     char* end;
     tm.tm_isdst = -1;
 
-    // Try ISO 8601: yyyy-mm-dd
+    // Try ISO 8601 date only: yyyy-mm-dd
     end = strptime(str, "%Y-%m-%d", &tm);
     if (end && *end == '\0') {
         if (tm.tm_mon >= 0 && tm.tm_mon <= 11 && tm.tm_mday >= 1 && tm.tm_mday <= 31) {
@@ -33,7 +67,7 @@ static time_t parse_date(const char* str) {
         }
     }
 
-    // Try mmddyyyy
+    // Try compact form: mmddyyyy
     memset(&tm, 0, sizeof(tm));
     tm.tm_isdst = -1;
     end = strptime(str, "%m%d%Y", &tm);
@@ -46,10 +80,23 @@ static time_t parse_date(const char* str) {
     return (time_t)-1;
 }
 
+/*
+ * Read newline-delimited file names from stdin and append them to ctx->include
+ *
+ * Behavior
+ * - Each non-empty line becomes one include entry
+ * - Trailing newline is stripped
+ * - Empty lines are ignored
+ *
+ * Error handling
+ * - Returns ZU_STATUS_IO if stdin reports a read error
+ * - Returns ZU_STATUS_OOM if list growth fails
+ */
 static int read_stdin_names(ZContext* ctx) {
     char* line = NULL;
     size_t linecap = 0;
     ssize_t linelen;
+
     while ((linelen = getline(&line, &linecap, stdin)) != -1) {
         if (linelen > 0 && line[linelen - 1] == '\n') {
             line[linelen - 1] = '\0';
@@ -62,13 +109,22 @@ static int read_stdin_names(ZContext* ctx) {
             }
         }
     }
+
     free(line);
+
     if (ferror(stdin)) {
         return ZU_STATUS_IO;
     }
     return ZU_STATUS_OK;
 }
 
+/*
+ * Convert internal ZU_STATUS_* codes into conventional exit codes
+ *
+ * The mapping is part of the CLI contract
+ * - Keep stable to avoid breaking scripts and packaging
+ * - Try to preserve distinct codes for usage, I/O, OOM, and unsupported features
+ */
 static int map_exit_code(int status) {
     switch (status) {
         case ZU_STATUS_OK:
@@ -88,14 +144,28 @@ static int map_exit_code(int status) {
     }
 }
 
+/*
+ * Emit warnings for options that are accepted but not fully implemented
+ *
+ * This is intentionally centralized so parsing logic can focus on state mutation
+ * and the user sees a single consolidated notice instead of repeated messages
+ */
 static void emit_zip_stub_warnings(ZContext* ctx) {
     if (ctx->fix_archive || ctx->fix_fix_archive) {
         char buf[256];
-        snprintf(buf, sizeof(buf), "%s is stubbed (Info-ZIP 3.0 parity pending): %s", ctx->fix_fix_archive ? "-FF" : "-F", "recovery semantics are still under validation");
+        snprintf(buf, sizeof(buf), "%s is stubbed (Info-ZIP parity pending): %s", ctx->fix_fix_archive ? "-FF" : "-F", "recovery semantics are still under validation");
         zu_warn_once(ctx, buf);
     }
 }
 
+/*
+ * Map the numeric compression method to a human-readable name
+ *
+ * Method IDs follow the ZIP format conventions used by the rest of the codebase
+ * - 0: stored
+ * - 8: deflated
+ * - 12: bzip2
+ */
 static const char* compression_method_name(int method) {
     switch (method) {
         case 0:
@@ -108,39 +178,83 @@ static const char* compression_method_name(int method) {
     }
 }
 
+/*
+ * Trace the final derived configuration after argument parsing
+ *
+ * This is intended for debugging and tests
+ * - Shows high-impact toggles that change I/O behavior and archive semantics
+ * - Avoids dumping every single flag, zu_cli_emit_option_trace handles detailed traces
+ */
 static void trace_effective_zip_defaults(ZContext* ctx) {
     zu_trace_option(ctx, "effective compression: %s level %d", compression_method_name(ctx->compression_method), ctx->compression_level);
+
     zu_trace_option(ctx, "paths: %s (recursive %s)", ctx->store_paths ? "preserve" : "junk", ctx->recursive ? "on" : "off");
+
     const char* target = ctx->output_to_stdout ? "stdout" : (ctx->output_path ? ctx->output_path : (ctx->archive_path ? ctx->archive_path : "(unset)"));
     zu_trace_option(ctx, "output target: %s", target);
+
     const char* mode = ctx->difference_mode ? "delete" : (ctx->freshen ? "freshen" : (ctx->update ? "update" : (ctx->filesync ? "filesync" : "create/modify")));
     zu_trace_option(ctx, "mode: %s%s%s%s", mode, ctx->remove_source ? " +move" : "", ctx->encrypt ? " +encrypt" : "", ctx->dry_run ? " +dry-run" : "");
+
     zu_trace_option(ctx, "quiet level: %d, verbose: %s", ctx->quiet_level, ctx->verbose ? "on" : "off");
 }
 
 /* --- Zipnote Helpers --- */
 
+/*
+ * Special pseudo-entry label used by zipnote streams to represent the archive comment
+ *
+ * Zipnote output is an edit script format
+ * - Each entry begins with "@ <name>"
+ * - Entry comment lines follow until the next "@ ..." marker
+ * - The archive comment uses this sentinel name
+ */
 static const char* zipnote_archive_label = "(zip file comment below this line)";
 
+/*
+ * Emit a zipnote comment block to stdout
+ *
+ * Rules
+ * - Empty comment prints a blank line so the marker delimiters remain valid
+ * - Lines starting with '@' must be escaped by prefixing an extra '@'
+ * - The input may or may not end with '\n', we always emit newline-delimited output
+ */
 static void zipnote_emit_comment(const char* data, size_t len) {
     if (!data || len == 0) {
         printf("\n");
         return;
     }
+
     size_t i = 0;
     while (i < len) {
         size_t line_end = i;
         while (line_end < len && data[line_end] != '\n')
             line_end++;
+
         size_t line_len = line_end - i;
+
         if (line_len > 0 && data[i] == '@')
             putchar('@');
+
         fwrite(data + i, 1, line_len, stdout);
         putchar('\n');
+
         i = line_end + 1;
     }
 }
 
+/*
+ * Print the zipnote edit-script representation of the archive to stdout
+ *
+ * Output format
+ * - For each entry:
+ *   - "@ <entry-name>"
+ *   - comment body
+ *   - "@"
+ * - Then the archive comment using zipnote_archive_label
+ *
+ * Requires central directory to be loaded so ctx->existing_entries and ctx->zip_comment are valid
+ */
 static int zipnote_list(ZContext* ctx) {
     int rc = zu_load_central_directory(ctx);
     if (rc != ZU_STATUS_OK)
@@ -160,6 +274,12 @@ static int zipnote_list(ZContext* ctx) {
     return ZU_STATUS_OK;
 }
 
+/*
+ * In-memory representation of one zipnote edit record
+ * - name identifies the entry or the archive label
+ * - comment is an owned buffer containing the replacement comment text
+ * - is_archive marks whether this edit targets the archive comment
+ */
 typedef struct {
     char* name;
     char* comment;
@@ -167,6 +287,10 @@ typedef struct {
     bool is_archive;
 } zipnote_edit;
 
+/*
+ * Free a zipnote_edit and its owned buffers
+ * - Safe to call on partially-populated edits
+ */
 static void zipnote_edit_free(zipnote_edit* e) {
     if (!e)
         return;
@@ -175,6 +299,11 @@ static void zipnote_edit_free(zipnote_edit* e) {
     free(e);
 }
 
+/*
+ * Append a zipnote_edit pointer to a growable vector
+ * - edits is a heap array of pointers
+ * - len and cap track current length and capacity
+ */
 static int zipnote_add_edit(zipnote_edit*** edits, size_t* len, size_t* cap, zipnote_edit* e) {
     if (*len == *cap) {
         size_t new_cap = *cap == 0 ? 8 : *cap * 2;
@@ -188,14 +317,28 @@ static int zipnote_add_edit(zipnote_edit*** edits, size_t* len, size_t* cap, zip
     return ZU_STATUS_OK;
 }
 
-/* zipnote streams come as alternating "@ name" markers and comment bodies.
- * We keep the current entry name and append every following line (with '@@' escaped)
- * until the next marker, materializing a list of edits for apply/write. */
+/*
+ * Parse a zipnote edit-script from stdin
+ *
+ * Input format summary
+ * - A marker line starts with "@ " followed by the entry name
+ * - Lines after a marker are comment lines for that entry until the next marker
+ * - A literal '@' at the start of a comment line is encoded as "@@"
+ *
+ * Output
+ * - Builds an array of zipnote_edit records (edits_out, edits_len_out)
+ *
+ * Notes
+ * - Unknown markers or malformed sections are skipped conservatively
+ * - This parser materializes comment bodies with '\n' separators to preserve original formatting
+ */
 static int zipnote_parse(ZContext* ctx, zipnote_edit*** edits_out, size_t* edits_len_out) {
     (void)ctx;
+
     char* line = NULL;
     size_t line_cap = 0;
     ssize_t got;
+
     zipnote_edit** edits = NULL;
     size_t edits_len = 0, edits_cap = 0;
 
@@ -209,6 +352,7 @@ static int zipnote_parse(ZContext* ctx, zipnote_edit*** edits_out, size_t* edits
             got--;
         }
 
+        // Marker line begins a new record, finalize the previous record first
         if (line[0] == '@' && line[1] != '@') {
             if (cur_name) {
                 zipnote_edit* e = calloc(1, sizeof(zipnote_edit));
@@ -225,7 +369,6 @@ static int zipnote_parse(ZContext* ctx, zipnote_edit*** edits_out, size_t* edits
                     goto oom_error;
                 }
 
-                // Ownership transferred to edit struct
                 cur_name = NULL;
                 comment_buf = NULL;
                 comment_len = 0;
@@ -235,11 +378,14 @@ static int zipnote_parse(ZContext* ctx, zipnote_edit*** edits_out, size_t* edits
             const char* name = line + 1;
             while (*name == ' ')
                 name++;
+
+            // "@\n" is a section terminator in zipnote output, ignore empty marker names
             if (*name == '\0') {
                 free(cur_name);
                 cur_name = NULL;
                 continue;
             }
+
             cur_name = strdup(name);
             comment_len = 0;
             comment_cap = 0;
@@ -248,6 +394,7 @@ static int zipnote_parse(ZContext* ctx, zipnote_edit*** edits_out, size_t* edits
             continue;
         }
 
+        // Comment data line, unescape "@@" to "@"
         const char* data = line;
         size_t data_len = (size_t)got;
         if (line[0] == '@' && line[1] == '@') {
@@ -255,9 +402,11 @@ static int zipnote_parse(ZContext* ctx, zipnote_edit*** edits_out, size_t* edits
             data_len -= 1;
         }
 
+        // Ignore comment lines until we have a current marker name
         if (!cur_name)
             continue;
 
+        // Ensure capacity and append data plus newline
         if (comment_len + data_len + 1 > comment_cap) {
             size_t new_cap = comment_cap == 0 ? 256 : comment_cap * 2;
             while (new_cap < comment_len + data_len + 1)
@@ -268,24 +417,29 @@ static int zipnote_parse(ZContext* ctx, zipnote_edit*** edits_out, size_t* edits
             comment_buf = nb;
             comment_cap = new_cap;
         }
+
         memcpy(comment_buf + comment_len, data, data_len);
         comment_len += data_len;
         comment_buf[comment_len++] = '\n';
     }
 
+    // Finalize trailing record if the stream ended without another marker
     if (cur_name) {
         zipnote_edit* e = calloc(1, sizeof(zipnote_edit));
         if (!e)
             goto oom_error;
+
         e->name = cur_name;
         e->comment = comment_buf;
         e->comment_len = comment_len;
         e->is_archive = (strcmp(cur_name, zipnote_archive_label) == 0);
+
         if (zipnote_add_edit(&edits, &edits_len, &edits_cap, e) != ZU_STATUS_OK) {
             zipnote_edit_free(e);
             goto oom_error;
         }
-        cur_name = NULL;  // Prevent double free
+
+        cur_name = NULL;
         comment_buf = NULL;
     }
 
@@ -304,6 +458,12 @@ oom_error:
     return ZU_STATUS_OOM;
 }
 
+/*
+ * Find an existing central directory entry by exact name match
+ *
+ * Note
+ * - zipnote uses exact names as emitted in zipnote_list, so we avoid any globbing here
+ */
 static zu_existing_entry* zipnote_find_entry(ZContext* ctx, const char* name) {
     for (size_t i = 0; i < ctx->existing_entries.len; ++i) {
         zu_existing_entry* e = (zu_existing_entry*)ctx->existing_entries.items[i];
@@ -313,6 +473,22 @@ static zu_existing_entry* zipnote_find_entry(ZContext* ctx, const char* name) {
     return NULL;
 }
 
+/*
+ * Apply zipnote edits read from stdin to the archive and rewrite the central directory
+ *
+ * Flow
+ * - Load the central directory
+ * - Parse stdin edits into a list
+ * - For each edit:
+ *   - If it targets the archive comment, replace ctx->zip_comment
+ *   - Otherwise locate the entry and replace its comment buffer
+ * - Mark changed entries so the writer updates comment fields
+ * - Call zu_modify_archive to persist changes
+ *
+ * Behavior notes
+ * - Unknown entry names are warned and ignored
+ * - If no archive edit is present, archive comment changes are not applied
+ */
 static int zipnote_apply(ZContext* ctx) {
     int rc = zu_load_central_directory(ctx);
     if (rc != ZU_STATUS_OK)
@@ -327,12 +503,13 @@ static int zipnote_apply(ZContext* ctx) {
     bool seen_archive = false;
     for (size_t i = 0; i < edits_len; ++i) {
         zipnote_edit* e = edits[i];
+
         if (e->is_archive) {
             free(ctx->zip_comment);
             ctx->zip_comment = e->comment;
             ctx->zip_comment_len = e->comment_len;
             ctx->zip_comment_specified = true;
-            e->comment = NULL;  // Steal ownership
+            e->comment = NULL;
             seen_archive = true;
             continue;
         }
@@ -347,9 +524,10 @@ static int zipnote_apply(ZContext* ctx) {
         existing->comment = e->comment;
         existing->comment_len = (uint16_t)e->comment_len;
         existing->changed = true;
-        e->comment = NULL;  // Steal ownership
+        e->comment = NULL;
     }
 
+    // If the edit script did not include an archive comment block, do not force one
     if (!seen_archive) {
         ctx->zip_comment_specified = false;
     }
@@ -362,6 +540,18 @@ static int zipnote_apply(ZContext* ctx) {
     return zu_modify_archive(ctx);
 }
 
+/*
+ * Read an archive comment from stdin into ctx->zip_comment
+ *
+ * Constraints
+ * - ZIP file comment length is limited to UINT16_MAX, enforce that here
+ * - The buffer is stored as raw bytes, but is null-terminated for convenience
+ *
+ * Return values
+ * - ZU_STATUS_OK on success
+ * - ZU_STATUS_IO on stdin read errors
+ * - ZU_STATUS_USAGE if the comment exceeds the ZIP comment length limit
+ */
 static int read_zip_comment(ZContext* ctx) {
     if (!ctx)
         return ZU_STATUS_USAGE;
@@ -386,16 +576,18 @@ static int read_zip_comment(ZContext* ctx) {
             cap = new_cap;
         }
     }
+
     if (ferror(stdin)) {
         free(buf);
         return ZU_STATUS_IO;
     }
+
     if (len > UINT16_MAX) {
         free(buf);
         return ZU_STATUS_USAGE;
     }
 
-    // Null terminate just in case, though len tracks size
+    // Ensure a terminating NUL for debug printing and safe string usage
     if (len == cap) {
         char* nb = realloc(buf, cap + 1);
         if (!nb) {
@@ -405,12 +597,18 @@ static int read_zip_comment(ZContext* ctx) {
         buf = nb;
     }
     buf[len] = '\0';
+
     free(ctx->zip_comment);
     ctx->zip_comment = buf;
     ctx->zip_comment_len = len;
     return ZU_STATUS_OK;
 }
 
+/*
+ * Print CLI usage
+ * - This is the public interface users rely on
+ * - Option grouping reflects parsing behavior in parse_zip_args
+ */
 static void print_usage(FILE* to, const char* argv0) {
     const ZuCliColors* c = zu_cli_colors();
     fprintf(to, "%sUsage:%s %s%s [options] archive.zip [file ...]%s\n", c->bold, c->reset, c->green, argv0, c->reset);
@@ -466,10 +664,28 @@ static void print_usage(FILE* to, const char* argv0) {
 
 /* --- Argument Parsing --- */
 
+/*
+ * Determine whether a short option character is allowed in a clustered flag token
+ *
+ * Example
+ * -rqv is treated as -r -q -v
+ *
+ * This list is intentionally restrictive
+ * - Options that take arguments must not be part of a cluster
+ * - Options that have special multi-letter forms (-FS, -FF, -ll, -la, -li) are handled separately
+ */
 static bool is_cluster_flag(char c) {
     return (strchr("rjTqvmdfuDXyel", c) != NULL) || (isdigit(c));
 }
 
+/*
+ * Apply a single clustered short option to the context
+ *
+ * Return value
+ * - ZU_STATUS_OK if applied
+ * - ZU_STATUS_NOT_IMPLEMENTED for accepted-but-unsupported behaviors
+ * - ZU_STATUS_USAGE for invalid flags
+ */
 static int apply_cluster_flag(char c, ZContext* ctx) {
     switch (c) {
         case 'r':
@@ -539,25 +755,41 @@ static int apply_cluster_flag(char c, ZContext* ctx) {
         zu_trace_option(ctx, "compression level %d", ctx->compression_level);
         return ZU_STATUS_OK;
     }
+
     return ZU_STATUS_USAGE;
 }
 
+/*
+ * Parse a variable-length pattern list following -x or -i
+ *
+ * Conventions
+ * - Consumes tokens until the next option-looking token or until "--" ends option parsing
+ * - Requires at least one pattern token, otherwise returns usage error
+ *
+ * Arguments
+ * - idx points at the option token, will be updated to the last consumed pattern
+ * - endopts tracks whether "--" has been seen
+ * - include selects whether patterns go to include_patterns or exclude
+ */
 static int parse_pattern_list(ZContext* ctx, int argc, char** argv, int* idx, bool* endopts, bool include) {
     int i = *idx + 1;
     bool any = false;
 
     for (; i < argc; ++i) {
         const char* tok = argv[i];
+
         if (!*endopts && strcmp(tok, "--") == 0) {
             *endopts = true;
             ++i;
             break;
         }
+
         if (!*endopts && tok[0] == '-' && tok[1] != '\0')
             break;
 
         if (zu_strlist_push(include ? &ctx->include_patterns : &ctx->exclude, tok) != 0)
             return ZU_STATUS_OOM;
+
         any = true;
     }
 
@@ -570,6 +802,13 @@ static int parse_pattern_list(ZContext* ctx, int argc, char** argv, int* idx, bo
     return ZU_STATUS_OK;
 }
 
+/*
+ * Like parse_pattern_list, but the first pattern may be attached to the option token
+ *
+ * Examples
+ * -x'*.o' expands to first="*.o"
+ * -iREADME expands to first="README"
+ */
 static int parse_pattern_list_with_first(ZContext* ctx, const char* first, int argc, char** argv, int* idx, bool* endopts, bool include) {
     if (first) {
         if (zu_strlist_push(include ? &ctx->include_patterns : &ctx->exclude, first) != 0)
@@ -579,9 +818,19 @@ static int parse_pattern_list_with_first(ZContext* ctx, const char* first, int a
     return parse_pattern_list(ctx, argc, argv, idx, endopts, include);
 }
 
+/*
+ * Split a suffix list (colon-separated) into ctx->no_compress_suffixes
+ *
+ * Example
+ * -n .png:.jpg:.zip
+ *
+ * Note
+ * - This is parsed as a list of exact suffix strings, matching semantics live in the execution layer
+ */
 static int push_suffixes(ZContext* ctx, const char* str) {
     if (!str || !*str)
         return ZU_STATUS_OK;
+
     char* copy = strdup(str);
     if (!copy)
         return ZU_STATUS_OOM;
@@ -595,12 +844,18 @@ static int push_suffixes(ZContext* ctx, const char* str) {
         }
         token = strtok_r(NULL, ":", &saveptr);
     }
+
     free(copy);
     return ZU_STATUS_OK;
 }
 
+/*
+ * Parse -n suffix list
+ * - Supports both "-nSUF1:SUF2" and "-n SUF1:SUF2"
+ */
 static int parse_suffix_list(ZContext* ctx, const char* first, int argc, char** argv, int* idx, bool* endopts) {
     (void)endopts;
+
     if (first)
         return push_suffixes(ctx, first);
 
@@ -608,14 +863,29 @@ static int parse_suffix_list(ZContext* ctx, const char* first, int argc, char** 
         zu_cli_error(g_tool_name, "-n requires suffix list");
         return ZU_STATUS_USAGE;
     }
+
     return push_suffixes(ctx, argv[++(*idx)]);
 }
 
+/*
+ * Parse a GNU-style long option token and update ctx
+ *
+ * Supported forms
+ * - --name
+ * - --name=value
+ * - --name value
+ *
+ * Notes
+ * - This parser is intentionally explicit rather than auto-generated so it can mirror Info-ZIP aliases
+ * - Unknown long options currently fall back to usage output
+ */
 static int parse_long_option(const char* tok, int argc, char** argv, int* idx, ZContext* ctx) {
     ctx->used_long_option = true;
+
     const char* name = tok + 2;
     const char* value = NULL;
     char namebuf[64];
+
     const char* eq = strchr(name, '=');
     if (eq) {
         size_t len = (size_t)(eq - name);
@@ -627,7 +897,7 @@ static int parse_long_option(const char* tok, int argc, char** argv, int* idx, Z
         value = eq + 1;
     }
 
-// Helper macro to check arg requirements
+    // Helper macro to fetch a required argument for a long option
 #define REQUIRE_ARG(optname)                                                   \
     do {                                                                       \
         if (!value) {                                                          \
@@ -742,6 +1012,19 @@ static int parse_long_option(const char* tok, int argc, char** argv, int* idx, Z
     return ZU_STATUS_USAGE;
 }
 
+/*
+ * Parse zip/zipnote arguments into ctx
+ *
+ * Key conventions
+ * - Option parsing stops at "--"
+ * - Many short options may be clustered (-rqv), but options requiring arguments are not clusterable
+ * - Multi-letter short forms (-FS, -FF, -ll, -la, -li) are handled as explicit tokens
+ * - Positional parsing
+ *   - First positional becomes archive_path (or "-" for stdout filter mode)
+ *   - Remaining positionals become include file operands
+ *
+ * is_zipnote controls acceptance of zipnote-only flags (-w) and mode validation
+ */
 static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote) {
     bool endopts = false;
     int i = 1;
@@ -758,11 +1041,13 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
         if (!endopts && tok[0] == '-' && tok[1] != '\0') {
             zu_trace_option(ctx, "option %s", tok);
 
-            // Rejects / Stubs
+            // Explicitly rejected combinations that are ambiguous or legacy in this implementation
             if (strcmp(tok, "-xi") == 0 || strcmp(tok, "-ix") == 0) {
                 zu_cli_error(g_tool_name, "use -x <patterns> ... -i <patterns> instead of %s", tok);
                 return ZU_STATUS_USAGE;
             }
+
+            // Explicit stubs and unsupported flags surfaced early so users get immediate feedback
             if (strcmp(tok, "-sp") == 0) {
                 zu_cli_error(g_tool_name, "split archives are not supported");
                 return ZU_STATUS_NOT_IMPLEMENTED;
@@ -772,7 +1057,7 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                 return ZU_STATUS_NOT_IMPLEMENTED;
             }
 
-            // Standalone flags
+            // Multi-letter standalone tokens with special behavior
             if (strcmp(tok, "-R") == 0) {
                 ctx->recursive = true;
                 ctx->recurse_from_cwd = true;
@@ -835,7 +1120,7 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                 continue;
             }
 
-            // Flags with Arguments
+            // Options that take a separate argument token
             if (strcmp(tok, "-TT") == 0) {
                 if (i + 1 >= argc) {
                     zu_cli_error(g_tool_name, "-TT requires a command");
@@ -860,6 +1145,8 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                 ++i;
                 continue;
             }
+
+            // -ttDATE or -tt DATE
             if (strncmp(tok, "-tt", 3) == 0) {
                 const char* arg = tok[3] ? tok + 3 : NULL;
                 if (!arg) {
@@ -878,6 +1165,8 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                 ++i;
                 continue;
             }
+
+            // Long options begin with "--"
             if (tok[1] == '-') {
                 int rc = parse_long_option(tok, argc, argv, &i, ctx);
                 if (rc != ZU_STATUS_OK)
@@ -886,11 +1175,11 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                 continue;
             }
 
-            // Clusterable with possible arg
+            // Clusterable tokens and short options with inline argument
             char first = tok[1];
             const char* rest = tok + 2;
 
-            // Handle options that take arguments (b, t, P, O, Z)
+            // Options that take arguments: -b, -t, -P, -O, -Z
             if (strchr("btPOZ", first)) {
                 const char* arg = rest[0] ? rest : NULL;
                 if (!arg) {
@@ -900,6 +1189,7 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                     }
                     arg = argv[++i];
                 }
+
                 switch (first) {
                     case 'b':
                         free(ctx->temp_dir);
@@ -907,6 +1197,7 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                         if (!ctx->temp_dir)
                             return ZU_STATUS_OOM;
                         break;
+
                     case 't':
                         ctx->filter_after = parse_date(arg);
                         if (ctx->filter_after == (time_t)-1) {
@@ -915,12 +1206,15 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                         }
                         ctx->has_filter_after = true;
                         break;
+
                     case 'P':
                         zu_cli_error(g_tool_name, "encryption is not supported in this build");
                         return ZU_STATUS_NOT_IMPLEMENTED;
+
                     case 'O':
                         ctx->output_path = arg;
                         break;
+
                     case 'Z':
                         if (strcasecmp(arg, "deflate") == 0)
                             ctx->compression_method = 8;
@@ -934,61 +1228,69 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                         }
                         break;
                 }
+
                 ++i;
                 continue;
             }
 
-            // Handle patterns / lists
+            // Pattern list and suffix list options may consume multiple tokens
             if (strcmp(tok, "-x") == 0) {
-                if (parse_pattern_list(ctx, argc, argv, &i, &endopts, false) != ZU_STATUS_OK)
-                    return ZU_STATUS_USAGE;
+                int rc = parse_pattern_list(ctx, argc, argv, &i, &endopts, false);
+                if (rc != ZU_STATUS_OK)
+                    return rc;
                 ++i;
                 continue;
             }
             if (first == 'x' && rest[0]) {
-                if (parse_pattern_list_with_first(ctx, rest, argc, argv, &i, &endopts, false) != ZU_STATUS_OK)
-                    return ZU_STATUS_USAGE;
+                int rc = parse_pattern_list_with_first(ctx, rest, argc, argv, &i, &endopts, false);
+                if (rc != ZU_STATUS_OK)
+                    return rc;
                 ++i;
                 continue;
             }
             if (strcmp(tok, "-i") == 0) {
-                if (parse_pattern_list(ctx, argc, argv, &i, &endopts, true) != ZU_STATUS_OK)
-                    return ZU_STATUS_USAGE;
+                int rc = parse_pattern_list(ctx, argc, argv, &i, &endopts, true);
+                if (rc != ZU_STATUS_OK)
+                    return rc;
                 ++i;
                 continue;
             }
             if (first == 'i' && rest[0]) {
-                if (parse_pattern_list_with_first(ctx, rest, argc, argv, &i, &endopts, true) != ZU_STATUS_OK)
-                    return ZU_STATUS_USAGE;
+                int rc = parse_pattern_list_with_first(ctx, rest, argc, argv, &i, &endopts, true);
+                if (rc != ZU_STATUS_OK)
+                    return rc;
                 ++i;
                 continue;
             }
             if (strcmp(tok, "-n") == 0) {
-                if (parse_suffix_list(ctx, NULL, argc, argv, &i, &endopts) != ZU_STATUS_OK)
-                    return ZU_STATUS_USAGE;
+                int rc = parse_suffix_list(ctx, NULL, argc, argv, &i, &endopts);
+                if (rc != ZU_STATUS_OK)
+                    return rc;
                 ++i;
                 continue;
             }
             if (first == 'n' && rest[0]) {
-                if (parse_suffix_list(ctx, rest, argc, argv, &i, &endopts) != ZU_STATUS_OK)
-                    return ZU_STATUS_USAGE;
+                int rc = parse_suffix_list(ctx, rest, argc, argv, &i, &endopts);
+                if (rc != ZU_STATUS_OK)
+                    return rc;
                 ++i;
                 continue;
             }
             if (strcmp(tok, "-@") == 0) {
-                if (read_stdin_names(ctx) != ZU_STATUS_OK)
-                    return ZU_STATUS_IO;
+                int rc = read_stdin_names(ctx);
+                if (rc != ZU_STATUS_OK)
+                    return rc;
                 ++i;
                 continue;
             }
 
-            // Check non-clusterable flags being clustered
+            // Guard against attaching extra characters to non-clusterable flags
             if (strchr("@FzcoAJ", first) && rest[0]) {
                 zu_cli_error(g_tool_name, "option '%c' cannot be clustered", first);
                 return ZU_STATUS_USAGE;
             }
 
-            // Cluster flags parsing
+            // Apply clustered short flags, failing on any unknown character
             bool handled = true;
             for (const char* p = tok + 1; *p; ++p) {
                 if (!is_cluster_flag(*p)) {
@@ -1003,13 +1305,16 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                 print_usage(stderr, argv[0]);
                 return ZU_STATUS_USAGE;
             }
+
             ++i;
             continue;
         }
 
-        // Positional Arguments
+        // Positional tokens are either archive name or file operands
         if (!ctx->archive_path) {
             ctx->archive_path = tok;
+
+            // "-" as the archive path triggers a filter-like mode writing to stdout
             if (strcmp(ctx->archive_path, "-") == 0)
                 ctx->output_to_stdout = true;
         }
@@ -1017,15 +1322,22 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
             if (zu_strlist_push(&ctx->include, tok) != 0)
                 return ZU_STATUS_OOM;
         }
+
         ++i;
     }
 
+    /*
+     * If no archive argument was provided, decide whether to enter implicit filter mode
+     *
+     * - If stdin is a tty and there are no include operands, treat it as usage
+     * - Otherwise assume stdin provides file data and stdout is the archive stream
+     */
     if (!ctx->archive_path) {
         if (ctx->include.len == 0 && isatty(STDIN_FILENO)) {
             print_usage(stderr, argv[0]);
             return ZU_STATUS_USAGE;
         }
-        // Implicit stdin-to-stdout filter mode
+
         ctx->archive_path = "-";
         ctx->output_to_stdout = true;
         if (zu_strlist_push(&ctx->include, "-") != 0)
@@ -1036,18 +1348,24 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
 }
 
 int main(int argc, char** argv) {
+    // Initialize terminal output handling for consistent colors and formatting
     zu_cli_init_terminal();
+
+    // Context owns all parsed flags, strings, and execution state
     ZContext* ctx = zu_context_create();
     if (!ctx) {
         zu_cli_error(g_tool_name, "failed to allocate context");
         return ZU_STATUS_OOM;
     }
 
+    // This front-end is for archive creation/modification paths
     ctx->modify_archive = true;
 
+    // Determine which behavior to enable based on argv0
     bool invoked_as_zipcloak = zu_cli_name_matches(argv[0], "zipcloak");
     bool is_zipnote = zu_cli_name_matches(argv[0], "zipnote");
 
+    // zipcloak exists in Info-ZIP for encryption, which is not supported in this build
     if (invoked_as_zipcloak) {
         zu_cli_error(g_tool_name, "zipcloak/encryption is not supported in this build");
         zu_context_free(ctx);
@@ -1060,6 +1378,7 @@ int main(int argc, char** argv) {
     if (is_zipnote)
         ctx->zipnote_mode = true;
 
+    // Parse CLI options into ctx, then normalize output behavior for dry-run
     int parse_rc = parse_zip_args(argc, argv, ctx, is_zipnote);
     if (parse_rc != ZU_STATUS_OK) {
         if (parse_rc != ZU_STATUS_USAGE)
@@ -1077,12 +1396,17 @@ int main(int argc, char** argv) {
     trace_effective_zip_defaults(ctx);
     zu_cli_emit_option_trace(g_tool_name, ctx);
 
+    // zipnote uses stdin for edit streams, so -z is rejected there to avoid ambiguity
     if (is_zipnote && ctx->zip_comment_specified) {
         zu_cli_error(g_tool_name, "zipnote: -z is not supported (use zip -z instead)");
         zu_context_free(ctx);
         return map_exit_code(ZU_STATUS_USAGE);
     }
 
+    /*
+     * If -z was specified, stdin becomes the archive-comment stream
+     * This is incompatible with reading file data from stdin ("-" file operand)
+     */
     if (ctx->zip_comment_specified) {
         for (size_t i = 0; i < ctx->include.len; ++i) {
             if (strcmp(ctx->include.items[i], "-") == 0) {
@@ -1091,6 +1415,7 @@ int main(int argc, char** argv) {
                 return ZU_STATUS_USAGE;
             }
         }
+
         int zrc = read_zip_comment(ctx);
         if (zrc != ZU_STATUS_OK) {
             zu_cli_error(g_tool_name, "failed to read archive comment: %s", zu_status_str(zrc));
@@ -1099,6 +1424,11 @@ int main(int argc, char** argv) {
         }
     }
 
+    /*
+     * Optional log file
+     * - Opened after parsing so -la and -lf are resolved first
+     * - Binary mode so byte-accurate logs remain stable across environments
+     */
     if (ctx->log_path) {
         ctx->log_file = fopen(ctx->log_path, ctx->log_append ? "ab" : "wb");
         if (!ctx->log_file) {
@@ -1108,6 +1438,7 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Dispatch to zipnote or zip execution path
     int exec_rc;
     if (is_zipnote) {
         exec_rc = ctx->zipnote_write ? zipnote_apply(ctx) : zipnote_list(ctx);
@@ -1116,6 +1447,7 @@ int main(int argc, char** argv) {
         exec_rc = zu_zip_run(ctx);
     }
 
+    // Execution layer may set a human-readable error string for the final failure
     if (exec_rc != ZU_STATUS_OK && ctx->error_msg[0] != '\0') {
         zu_cli_error(g_tool_name, "%s", ctx->error_msg);
     }
