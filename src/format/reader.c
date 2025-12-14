@@ -1231,6 +1231,106 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
                 return ZU_STATUS_IO;
             }
 
+            // Check overwrite policy if file exists
+            struct stat st;
+            if (lstat(out_path, &st) == 0) {
+                if (ctx->overwrite_policy == ZU_OVERWRITE_NEVER) {
+                    // Silently skip
+                    free(out_path);
+                    return ZU_STATUS_OK;
+                }
+
+                if (ctx->overwrite_policy == ZU_OVERWRITE_PROMPT) {
+                    // Open tty for prompting if possible
+                    FILE* tty = fopen("/dev/tty", "r+");
+                    if (!tty) {
+                        // If no tty, we must fail in non-interactive per spec
+                        free(out_path);
+                        zu_context_set_error(ctx, ZU_STATUS_IO, "file exists (non-interactive)");
+                        return ZU_STATUS_IO;
+                    }
+
+                    fprintf(tty, "replace %s? [y]es, [n]o, [A]ll, [N]one, [r]ename: ", out_path);
+
+                    int decision = -1;  // 0=skip, 1=overwrite
+
+                    while (decision == -1) {
+                        int ch = fgetc(tty);
+                        if (ch == EOF) {
+                            decision = 0;  // treat EOF as no
+                            break;
+                        }
+
+                        // Consume rest of line
+                        if (ch != '\n') {
+                            int next;
+                            while ((next = fgetc(tty)) != '\n' && next != EOF)
+                                ;
+                        }
+
+                        if (ch == '\n') {
+                            fprintf(tty, "replace %s? [y]es, [n]o, [A]ll, [N]one, [r]ename: ", out_path);
+                            continue;
+                        }
+
+                        switch (ch) {
+                            case 'y':
+                            case 'Y':
+                                decision = 1;
+                                break;
+                            case 'n':
+                                decision = 0;
+                                break;
+                            case 'N':
+                                ctx->overwrite_policy = ZU_OVERWRITE_NEVER;
+                                decision = 0;
+                                break;
+                            case 'A':
+                                ctx->overwrite_policy = ZU_OVERWRITE_ALWAYS;
+                                decision = 1;
+                                break;
+                            // Unzip uses 'N' for "None" -> Never overwrite
+                            /*
+                               Wait, 'N' for None means "do not overwrite this or any future files"
+                               which maps to ZU_OVERWRITE_NEVER
+                            */
+                            /*
+                               However, some unzip versions treat 'N' as "No" and have separate "None" via different key?
+                               Info-ZIP 6.0: [y]es, [n]o, [A]ll, [N]one, [r]ename
+                               y: yes
+                               n: no
+                               A: All (always overwrite)
+                               N: None (never overwrite)
+                               r: rename
+                            */
+                            /*
+                               Wait, I handled 'N' as case 'N' above but need to differentiate 'n' (no) vs 'N' (None).
+                               Let's fix the case logic.
+                            */
+                            case 'r':
+                            case 'R':
+                                fprintf(tty, "rename not implemented, use (y/n/A/N): ");
+                                break;
+                            default:
+                                fprintf(tty, "y/n/A/N: ");
+                        }
+                    }
+
+                    fclose(tty);
+
+                    if (decision == 0) {
+                        if (ctx->overwrite_policy != ZU_OVERWRITE_NEVER) {
+                            // If user picked 'n', just skip this one
+                        }
+                        else {
+                            // If user picked 'N', policy is now NEVER
+                        }
+                        free(out_path);
+                        return ZU_STATUS_OK;
+                    }
+                }
+            }
+
             fp = fopen(out_path, "wb");
             if (!fp) {
                 free(out_path);

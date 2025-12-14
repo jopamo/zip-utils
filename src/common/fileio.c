@@ -149,6 +149,34 @@ int zu_open_input(ZContext* ctx, const char* path) {
         return rc;
     }
 
+    if (strcmp(path, "-") == 0) {
+        FILE* tmp = tmpfile();
+        if (!tmp) {
+            zu_context_set_error(ctx, ZU_STATUS_IO, "failed to create temp file for stdin");
+            return ZU_STATUS_IO;
+        }
+
+        uint8_t buf[8192];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), stdin)) > 0) {
+            if (fwrite(buf, 1, n, tmp) != n) {
+                fclose(tmp);
+                zu_context_set_error(ctx, ZU_STATUS_IO, "write to temp file failed");
+                return ZU_STATUS_IO;
+            }
+        }
+
+        if (ferror(stdin)) {
+            fclose(tmp);
+            zu_context_set_error(ctx, ZU_STATUS_IO, "read from stdin failed");
+            return ZU_STATUS_IO;
+        }
+
+        rewind(tmp);
+        ctx->in_file = tmp;
+        return ZU_STATUS_OK;
+    }
+
     ctx->in_file = fopen(path, "rb");
     if (!ctx->in_file) {
         char buf[128];

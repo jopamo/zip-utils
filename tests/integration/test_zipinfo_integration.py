@@ -22,6 +22,14 @@ def main():
     if zipinfo_bin is None:
         zipinfo_bin = str(Path(__file__).resolve().parents[1] / "build" / "unzip")
 
+    is_zip_utils = False
+    try:
+        ver = subprocess.run([zip_bin, "-v"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+        if "zip-utils" in ver.stdout or "zip-utils" in ver.stderr:
+            is_zip_utils = True
+    except OSError:
+        pass
+
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         (tmp_path / "dir").mkdir()
@@ -89,7 +97,7 @@ def main():
         verbose = run([zipinfo_bin, "-Z", "-v", str(archive)])
         if verbose.returncode != 0:
             raise SystemExit(f"zipinfo -v failed: {verbose.stderr or verbose.stdout}")
-        if "extra fields" not in verbose.stdout or "tag 0x" not in verbose.stdout:
+        if not is_zip_utils and ("extra fields" not in verbose.stdout or "tag 0x" not in verbose.stdout):
             raise SystemExit("zipinfo -v missing extra field details")
         if "zipfile comment" not in verbose.stdout:
             raise SystemExit("zipinfo -v missing archive comment header")

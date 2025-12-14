@@ -67,7 +67,11 @@ struct ZContext {
     bool filesync; /* -FS */
     bool output_to_stdout;
     bool list_only;
-    bool overwrite;
+    enum {
+        ZU_OVERWRITE_PROMPT = 0,
+        ZU_OVERWRITE_ALWAYS,
+        ZU_OVERWRITE_NEVER,
+    } overwrite_policy;
     bool match_case;
     bool allow_symlinks;
     bool allow_fifo;
@@ -135,6 +139,9 @@ struct ZContext {
     bool fix_archive;     /* -F */
     bool fix_fix_archive; /* -FF */
     bool copy_mode;       /* -U / --copy */
+
+    /* Stdin tracking */
+    bool stdin_names_read; /* -@ */
 
     /* Version output */
     bool version_only;

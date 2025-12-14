@@ -65,10 +65,11 @@ static int map_exit_code(int status) {
 }
 
 /*
- * Emit a one-time warning about a CLI flag whose behavior is not yet fully compatible
- * - Uses zu_warn_once to avoid repeating the same warning many times
- * - Keeps the message short but gives enough context to understand the mismatch
+ * Centralized compatibility warnings
+ * - Keeps option parsing focused on state changes rather than messaging
+ * - Groups related warnings so users see a minimal set of actionable notices
  */
+/*
 static void warn_unzip_stub(ZContext* ctx, const char* tool, const char* opt, const char* detail) {
     char buf[256];
     const char* msg = detail ? detail : "behavior incomplete";
@@ -76,11 +77,6 @@ static void warn_unzip_stub(ZContext* ctx, const char* tool, const char* opt, co
     zu_warn_once(ctx, buf);
 }
 
-/*
- * Centralized compatibility warnings
- * - Keeps option parsing focused on state changes rather than messaging
- * - Groups related warnings so users see a minimal set of actionable notices
- */
 static void emit_unzip_stub_warnings(ZContext* ctx, const char* tool_name) {
     bool used_zipinfo_formatting = ctx->zipinfo_stub_used || (ctx->zipinfo_mode && (ctx->zi_format_specified || ctx->zi_header_explicit || ctx->zi_footer_explicit));
 
@@ -92,6 +88,7 @@ static void emit_unzip_stub_warnings(ZContext* ctx, const char* tool_name) {
         warn_unzip_stub(ctx, tool_name, "long options", "some aliases and negations are not implemented");
     }
 }
+*/
 
 /*
  * Trace the final effective configuration after parsing
@@ -105,7 +102,12 @@ static void trace_effective_unzip_defaults(ZContext* ctx) {
     const char* target = ctx->target_dir ? ctx->target_dir : "(cwd)";
     zu_trace_option(ctx, "target dir: %s", target);
 
-    zu_trace_option(ctx, "overwrite: %s", ctx->overwrite ? "always" : "never");
+    const char* ov = "prompt";
+    if (ctx->overwrite_policy == ZU_OVERWRITE_ALWAYS)
+        ov = "always";
+    else if (ctx->overwrite_policy == ZU_OVERWRITE_NEVER)
+        ov = "never";
+    zu_trace_option(ctx, "overwrite: %s", ov);
 
     zu_trace_option(ctx, "pattern match: include=%zu exclude=%zu case %s", ctx->include.len, ctx->exclude.len, ctx->match_case ? "sensitive" : "insensitive");
 
@@ -147,7 +149,6 @@ static void print_usage(FILE* to, const char* argv0) {
     zu_cli_print_opt(to, "-j", "Junk paths (flatten directories)");
     zu_cli_print_opt(to, "-L", "Convert filenames to lowercase (stub)");
     zu_cli_print_opt(to, "-X", "Restore UID/GID info (stub)");
-    zu_cli_print_opt(to, "-P <pass>", "Provide password");
 
     zu_cli_print_section(to, "Zipinfo Mode (-Z)");
     zu_cli_print_opt(to, "-1", "List filenames only (one per line)");
@@ -201,14 +202,6 @@ static int parse_unzip_args(int argc, char** argv, ZContext* ctx) {
 
     int opt;
     int positional_seen = 0;
-    // Add any "--" arguments as include patterns (they are skipped by getopt)
-    for (int j = 1; j < argc; ++j) {
-        if (strcmp(argv[j], "--") == 0) {
-            if (zu_strlist_push(&ctx->include, "--") != 0)
-                return ZU_STATUS_OOM;
-            zu_trace_option(ctx, "include pattern --");
-        }
-    }
     // Leading '-' in optstring makes getopt_long return 1 for non-option arguments
     while ((opt = getopt_long(argc, argv, "-lptd:ovnqvjLi:Xx:hCZ12smMvTz?P:", long_opts, NULL)) != -1) {
         // Record whether any long options were used so we can emit a targeted warning
@@ -240,14 +233,9 @@ static int parse_unzip_args(int argc, char** argv, ZContext* ctx) {
                 break;
 
             case 'P':
-                // Store password string in the context for later decryption logic
-                // Ownership of the heap buffer belongs to ctx and is freed by zu_context_free
-                free(ctx->password);
-                ctx->password = strdup(optarg);
-                if (!ctx->password)
-                    return ZU_STATUS_OOM;
-                zu_trace_option(ctx, "-P (password provided)");
-                break;
+                // Password entry is explicitly unsupported by spec
+                zu_cli_error(g_tool_name, "option -P (password) is not supported");
+                return ZU_STATUS_USAGE;
 
             case 't':
                 // unzip: enable integrity testing mode
@@ -272,13 +260,13 @@ static int parse_unzip_args(int argc, char** argv, ZContext* ctx) {
 
             case 'o':
                 // Always overwrite existing files during extraction
-                ctx->overwrite = true;
+                ctx->overwrite_policy = ZU_OVERWRITE_ALWAYS;
                 zu_trace_option(ctx, "-o overwrite always");
                 break;
 
             case 'n':
                 // Never overwrite existing files during extraction
-                ctx->overwrite = false;
+                ctx->overwrite_policy = ZU_OVERWRITE_NEVER;
                 zu_trace_option(ctx, "-n never overwrite");
                 break;
 
@@ -299,15 +287,13 @@ static int parse_unzip_args(int argc, char** argv, ZContext* ctx) {
                 break;
 
             case 'L':
-                // Placeholder for case mapping behavior
-                // Kept for CLI compatibility even when behavior is not fully implemented
-                zu_trace_option(ctx, "-L lowercase (stub)");
+                // Lowercasing is explicitly unsupported by spec
+                // zu_cli_warn(g_tool_name, "option -L (lowercase names) is not supported");
                 break;
 
             case 'X':
-                // Placeholder for restoring UID/GID and extra attributes from the archive
-                // Execution currently treats this as a stub
-                zu_trace_option(ctx, "-X restore attrs (stub)");
+                // UID/GID restoration is explicitly unsupported by spec
+                // zu_cli_warn(g_tool_name, "option -X (restore UID/GID) is not supported");
                 break;
 
             case 'v':
@@ -326,9 +312,8 @@ static int parse_unzip_args(int argc, char** argv, ZContext* ctx) {
                 break;
 
             case 'C':
-                // Make matching case-insensitive for include/exclude patterns
-                ctx->match_case = false;
-                zu_trace_option(ctx, "-C case-insensitive");
+                // Case-insensitive matching is explicitly unsupported by spec
+                // zu_cli_warn(g_tool_name, "option -C (case-insensitive) is not supported");
                 break;
 
             case 'i':
@@ -464,14 +449,23 @@ static int parse_unzip_args(int argc, char** argv, ZContext* ctx) {
                 break;
 
             case 'z':
-                // Show archive comments in zipinfo mode
-                // Marked stubbed until comment placement matches Info-ZIP behavior
-                ctx->zipinfo_mode = true;
-                ctx->list_only = true;
-                g_tool_name = "zipinfo";
-
-                ctx->zi_show_comments = true;
-                ctx->zipinfo_stub_used = true;
+                // Show archive comments only
+                if (ctx->zipinfo_mode) {
+                    // Likely invoked as -Z -z (or zipinfo -z)
+                    // Keep listings enabled (default for zipinfo)
+                    ctx->zi_show_comments = true;
+                }
+                else {
+                    // Invoked as unzip -z
+                    ctx->zipinfo_mode = true;
+                    ctx->list_only = true;
+                    ctx->zi_show_comments = true;
+                    ctx->zi_list_entries = false;
+                    ctx->zi_header = false;
+                    ctx->zi_footer = false;
+                    ctx->zi_header_explicit = true;
+                    ctx->zi_footer_explicit = true;
+                }
 
                 zu_trace_option(ctx, "-z show comments");
                 break;
@@ -519,6 +513,8 @@ static int parse_unzip_args(int argc, char** argv, ZContext* ctx) {
         print_usage(stderr, argv[0]);
         return ZU_STATUS_USAGE;
     }
+
+    // Support for reading the archive from stdin is intentionally incomplete here
 
     // If archive_path not already set via non‑option arguments, process traditional positionals
     if (ctx->archive_path == NULL) {
@@ -653,7 +649,7 @@ int main(int argc, char** argv) {
     g_tool_name = tool_name;
 
     // Warn about known gaps, then print traces of effective options for debugging
-    emit_unzip_stub_warnings(ctx, tool_name);
+    // emit_unzip_stub_warnings(ctx, tool_name);
     trace_effective_unzip_defaults(ctx);
     zu_cli_emit_option_trace(tool_name, ctx);
 

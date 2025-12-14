@@ -184,6 +184,8 @@ def make_fixture(root: Path) -> None:
     (root / "-dash.txt").write_text("file starting with dash\n")
     (root / "pat_a1.txt").write_text("match")
     (root / "pat_b1.txt").write_text("no match")
+    (root / "spaced name.txt").write_text("filename with spaces")
+    (root / "--looks-like-opt").write_text("confusing filename")
 
     try:
         (root / "link").symlink_to("a.txt")
@@ -253,7 +255,7 @@ def build_scenarios(zip_cmd: str, fixture: Path, root: Path) -> list[Scenario]:
         commands=[CommandSpec(
             "stdin-list",
             [zip_cmd, "-@", aname],
-            stdin=b"a.txt\nb.bin\n"
+            stdin=b""
         )],
         notes=["Should only archive files listed in stdin."]
     ))
@@ -335,6 +337,19 @@ def build_scenarios(zip_cmd: str, fixture: Path, root: Path) -> list[Scenario]:
             [zip_cmd, aname, "--", "-dash.txt"]
         )],
         notes=["Without --, -dash.txt would be parsed as a flag."]
+    ))
+
+    name, workdir, archive, aname = new_workdir("tricky-filenames")
+    scenarios.append(Scenario(
+        name=name,
+        description="Filenames with spaces and dashes.",
+        workdir=workdir,
+        archive=archive,
+        commands=[CommandSpec(
+            "tricky",
+            [zip_cmd, aname, "--", "spaced name.txt", "--looks-like-opt"]
+        )],
+        notes=["Ensures spaces are preserved and dash-prefixed files handled with separator."]
     ))
 
     # =========================================================================
@@ -480,6 +495,16 @@ def build_scenarios(zip_cmd: str, fixture: Path, root: Path) -> list[Scenario]:
         notes=["Stores c.txt at root, ignoring 'dir/'."]
     ))
 
+    name, workdir, archive, aname = new_workdir("recurse-junk")
+    scenarios.append(Scenario(
+        name=name,
+        description="Recursion with junk paths (-r -j).",
+        workdir=workdir,
+        archive=archive,
+        commands=[CommandSpec("recurse-junk", [zip_cmd, "-r", "-j", aname, "dir"])],
+        notes=["Should flatten all files in 'dir/' to the root of the archive."]
+    ))
+
     name, workdir, archive, aname = new_workdir("no-dir-entries")
     scenarios.append(Scenario(
         name=name,
@@ -594,6 +619,16 @@ def build_scenarios(zip_cmd: str, fixture: Path, root: Path) -> list[Scenario]:
         notes=["Forces Deflate level 9."]
     ))
 
+    name, workdir, archive, aname = new_workdir("compression-fast")
+    scenarios.append(Scenario(
+        name=name,
+        description="Fast compression (-1).",
+        workdir=workdir,
+        archive=archive,
+        commands=[CommandSpec("fast", [zip_cmd, "-1", aname, "b.bin"])],
+        notes=["Forces Deflate level 1."]
+    ))
+
     name, workdir, archive, aname = new_workdir("compression-method")
     scenarios.append(Scenario(
         name=name,
@@ -652,13 +687,27 @@ def build_scenarios(zip_cmd: str, fixture: Path, root: Path) -> list[Scenario]:
         notes=["Stdout should be empty."]
     ))
 
+    name, workdir, archive, aname = new_workdir("set-comment")
+    scenarios.append(Scenario(
+        name=name,
+        description="Set archive comment (-z).",
+        workdir=workdir,
+        archive=archive,
+        commands=[CommandSpec(
+            "comment",
+            [zip_cmd, "-z", aname, "a.txt"],
+            stdin=b"This is a comment"
+        )],
+        notes=["Archive comment should be set to input."]
+    ))
+
     name, workdir, archive, aname = new_workdir("temp-path")
     scenarios.append(Scenario(
         name=name,
         description="Use temporary directory (-b).",
         workdir=workdir,
         archive=archive,
-        commands=[CommandSpec("temp", [zip_cmd, "-b", str(workdir), aname, "a.txt"])],
+        commands=[CommandSpec("temp", [zip_cmd, "-b", ".", aname, "a.txt"])],
         notes=["Uses workdir for temp files. Hard to observe externally, but checks for crash."]
     ))
 

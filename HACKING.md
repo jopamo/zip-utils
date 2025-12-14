@@ -27,6 +27,3 @@ For parity investigations, capture reference output from the documentation helpe
 * Zipinfo comparison: `python3 tools/document_zipinfo_output.py --zipinfo /home/me/projects/zip-utils/build/unzip --zipinfo-arg=-Z --outdir zipinfo-doc-build` (use `-Z` when invoking through the unzip binary; runs the same scenarios and writes into `zipinfo-doc-build/`)
 * Follow-up: diff the two outdirs’ captured stdout/stderr/return codes per scenario using the `summary.md`/JSONL metadata in each directory
 * Convenience: `tools/run_comparison_docs.sh [output-dir]` runs all six captures (zip/unzip/zipinfo system + build) with configurable binaries via `ZIP_BIN`, `UNZIP_BIN`, `ZIPINFO_BIN`, `OUR_ZIP`, and `OUR_UNZIP`
-
-## Commit & Pull Request Guidelines
-Favor behavior-focused commits with the existing style (`feat(core): ...`, `fix(zip): ...`, etc.). Describe user-visible changes clearly and keep PRs small and scoped. Update `README.md` and `CHECKLIST.md`, and always double check specs (`zip-spec.md`, `unzip-spec.md`) when closing parity gaps or altering flags. Include the commands you ran (e.g., `meson test -C build`) and call out any skipped suites. Link issues where relevant and summarize behavioral differences from Info-ZIP.

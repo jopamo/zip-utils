@@ -64,6 +64,3 @@ Performance shortcuts:
 - Run `meson test -C build` before sending changes; it drives both C and Python suites.
 - Large Zip64 coverage: `ZU_RUN_LARGE_TESTS=1 ZU_LARGE_SIZE_GB=5 meson test -C build --suite long`.
 - List suites: `meson test -C build --list`; target one test: `meson test -C build integration-create -v`.
-
-## Contributing
-Follow `HACKING.md` for workflow, style (Chromium clang-format with 4-space indents, no tabs, 200 cols), and test expectations. Keep CLIs thin, thread state through `ZContext`, and document any intentional divergences from Info-ZIP in tests and parity docs.

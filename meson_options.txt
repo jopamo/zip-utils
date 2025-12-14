@@ -5,3 +5,10 @@ option(
   description: 'Build with clang + address/UB sanitizers and relaxed link rules'
 )
 
+option(
+  'generate_parity',
+  type: 'boolean',
+  value: true,
+  description: 'Regenerate parity test cases from system zip/unzip behavior'
+)
+

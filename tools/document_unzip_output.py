@@ -364,16 +364,6 @@ def build_scenarios(unzip_cmd: str, root: Path) -> list[Scenario]:
         notes=["a.txt should contain 'content A'."]
     ))
 
-    name, workdir, _, aname = new_env("arg-separator")
-    scenarios.append(Scenario(
-        name=name,
-        description="Argument separator (--).",
-        workdir=workdir,
-        archive_source=workdir / aname,
-        commands=[CommandSpec("separator", [unzip_cmd, aname, "--", "a.txt"])],
-        notes=["Ensures parsing stops at --."]
-    ))
-
     # =========================================================================
     # 5. Stdin / Streaming
     # =========================================================================

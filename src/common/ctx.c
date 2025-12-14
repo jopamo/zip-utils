@@ -99,6 +99,10 @@ ZContext* zu_context_create(void) {
     ctx->zipnote_write = false;
     ctx->zipinfo_mode = false;
 
+    ctx->output_to_stdout = false;
+    ctx->list_only = false;
+    ctx->overwrite_policy = ZU_OVERWRITE_PROMPT;
+
     /*
      * Symlink policy
      * - allow_symlinks controls whether symlinks are permitted as inputs

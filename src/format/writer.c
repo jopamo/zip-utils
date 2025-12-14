@@ -724,7 +724,7 @@ static int describe_input(ZContext* ctx, const char* path, zu_input_info* info) 
     return ZU_STATUS_OK;
 }
 
-static int compute_crc_and_size(ZContext* ctx, const char* path, uint32_t* crc_out, uint64_t* size_out) {
+static int compute_crc_and_size(ZContext* ctx, const char* path, uint32_t* crc_out, uint64_t* size_out, bool translate) {
     FILE* fp = fopen(path, "rb");
     if (!fp) {
         char msg[128];
@@ -743,20 +743,41 @@ static int compute_crc_and_size(ZContext* ctx, const char* path, uint32_t* crc_o
     uint32_t crc = 0;
     uint64_t total = 0;
     size_t got = 0;
+    bool prev_cr = false;
+    int rc = ZU_STATUS_OK;
+
     while ((got = fread(buf, 1, ZU_IO_CHUNK, fp)) > 0) {
-        crc = zu_crc32(buf, got, crc);
-        total += got;
+        if (translate) {
+            uint8_t* tbuf = buf;
+            size_t tlen = got;
+            rc = translate_buffer(ctx, buf, got, &tbuf, &tlen, &prev_cr);
+            if (rc != ZU_STATUS_OK) {
+                break;
+            }
+            crc = zu_crc32(tbuf, tlen, crc);
+            total += tlen;
+            if (tbuf != buf) {
+                free(tbuf);
+            }
+        }
+        else {
+            crc = zu_crc32(buf, got, crc);
+            total += got;
+        }
     }
 
-    if (ferror(fp)) {
+    if (rc == ZU_STATUS_OK && ferror(fp)) {
         char msg[128];
         snprintf(msg, sizeof(msg), "read '%s' failed", path);
         zu_context_set_error(ctx, ZU_STATUS_IO, msg);
-        fclose(fp);
-        return ZU_STATUS_IO;
+        rc = ZU_STATUS_IO;
     }
 
     fclose(fp);
+    if (rc != ZU_STATUS_OK) {
+        return rc;
+    }
+
     if (crc_out)
         *crc_out = crc;
     if (size_out)
@@ -764,7 +785,7 @@ static int compute_crc_and_size(ZContext* ctx, const char* path, uint32_t* crc_o
     return ZU_STATUS_OK;
 }
 
-static int compress_to_temp(ZContext* ctx, const char* path, int method, int level, FILE** temp_out, uint32_t* crc_out, uint64_t* uncomp_out, uint64_t* comp_out) {
+static int compress_to_temp(ZContext* ctx, const char* path, int method, int level, FILE** temp_out, uint32_t* crc_out, uint64_t* uncomp_out, uint64_t* comp_out, bool translate) {
     if (!temp_out) {
         return ZU_STATUS_USAGE;
     }
@@ -797,6 +818,7 @@ static int compress_to_temp(ZContext* ctx, const char* path, int method, int lev
     uint64_t total_in = 0;
     size_t got = 0;
     int rc = ZU_STATUS_OK;
+    bool prev_cr = false;
 
     if (method == 8) { /* Deflate */
         z_stream strm;
@@ -810,10 +832,21 @@ static int compress_to_temp(ZContext* ctx, const char* path, int method, int lev
         }
 
         while ((got = fread(inbuf, 1, ZU_IO_CHUNK, in)) > 0) {
-            crc = zu_crc32(inbuf, got, crc);
-            total_in += got;
-            strm.next_in = inbuf;
-            strm.avail_in = (uInt)got;
+            uint8_t* next_in = inbuf;
+            size_t next_len = got;
+
+            if (translate) {
+                rc = translate_buffer(ctx, inbuf, got, &next_in, &next_len, &prev_cr);
+                if (rc != ZU_STATUS_OK) {
+                    deflateEnd(&strm);
+                    goto comp_done;
+                }
+            }
+
+            crc = zu_crc32(next_in, next_len, crc);
+            total_in += next_len;
+            strm.next_in = next_in;
+            strm.avail_in = (uInt)next_len;
             do {
                 strm.next_out = outbuf;
                 strm.avail_out = (uInt)ZU_IO_CHUNK;
@@ -822,6 +855,8 @@ static int compress_to_temp(ZContext* ctx, const char* path, int method, int lev
                     rc = ZU_STATUS_IO;
                     zu_context_set_error(ctx, rc, "compression failed");
                     deflateEnd(&strm);
+                    if (translate && next_in != inbuf)
+                        free(next_in);
                     goto comp_done;
                 }
                 size_t have = ZU_IO_CHUNK - strm.avail_out;
@@ -829,9 +864,15 @@ static int compress_to_temp(ZContext* ctx, const char* path, int method, int lev
                     rc = ZU_STATUS_IO;
                     zu_context_set_error(ctx, rc, "write compressed data failed");
                     deflateEnd(&strm);
+                    if (translate && next_in != inbuf)
+                        free(next_in);
                     goto comp_done;
                 }
             } while (strm.avail_out == 0);
+
+            if (translate && next_in != inbuf) {
+                free(next_in);
+            }
         }
         if (ferror(in)) {
             rc = ZU_STATUS_IO;
@@ -871,10 +912,21 @@ static int compress_to_temp(ZContext* ctx, const char* path, int method, int lev
         }
 
         while ((got = fread(inbuf, 1, ZU_IO_CHUNK, in)) > 0) {
-            crc = zu_crc32(inbuf, got, crc);
-            total_in += got;
-            strm.next_in = (char*)inbuf;
-            strm.avail_in = (unsigned int)got;
+            uint8_t* next_in = inbuf;
+            size_t next_len = got;
+
+            if (translate) {
+                rc = translate_buffer(ctx, inbuf, got, &next_in, &next_len, &prev_cr);
+                if (rc != ZU_STATUS_OK) {
+                    BZ2_bzCompressEnd(&strm);
+                    goto comp_done;
+                }
+            }
+
+            crc = zu_crc32(next_in, next_len, crc);
+            total_in += next_len;
+            strm.next_in = (char*)next_in;
+            strm.avail_in = (unsigned int)next_len;
             do {
                 strm.next_out = (char*)outbuf;
                 strm.avail_out = (unsigned int)ZU_IO_CHUNK;
@@ -883,6 +935,8 @@ static int compress_to_temp(ZContext* ctx, const char* path, int method, int lev
                     rc = ZU_STATUS_IO;
                     zu_context_set_error(ctx, rc, "bzip2 compression failed");
                     BZ2_bzCompressEnd(&strm);
+                    if (translate && next_in != inbuf)
+                        free(next_in);
                     goto comp_done;
                 }
                 size_t have = ZU_IO_CHUNK - strm.avail_out;
@@ -890,9 +944,15 @@ static int compress_to_temp(ZContext* ctx, const char* path, int method, int lev
                     rc = ZU_STATUS_IO;
                     zu_context_set_error(ctx, rc, "write compressed data failed");
                     BZ2_bzCompressEnd(&strm);
+                    if (translate && next_in != inbuf)
+                        free(next_in);
                     goto comp_done;
                 }
             } while (strm.avail_out == 0);
+
+            if (translate && next_in != inbuf) {
+                free(next_in);
+            }
         }
         if (ferror(in)) {
             rc = ZU_STATUS_IO;
@@ -957,7 +1017,7 @@ comp_done:
     return ZU_STATUS_OK;
 }
 
-static int write_file_data(ZContext* ctx, const char* path, FILE* staged, uint64_t expected_size, zu_zipcrypto_ctx* zc) {
+static int write_file_data(ZContext* ctx, const char* path, FILE* staged, uint64_t expected_size, zu_zipcrypto_ctx* zc, bool translate) {
     FILE* src = staged ? staged : fopen(path, "rb");
     if (!src) {
         char msg[128];
@@ -974,17 +1034,42 @@ static int write_file_data(ZContext* ctx, const char* path, FILE* staged, uint64
     }
     uint64_t written = 0;
     size_t got = 0;
+    int rc = ZU_STATUS_OK;
+    bool prev_cr = false;
+
     while ((got = fread(buf, 1, ZU_IO_CHUNK, src)) > 0) {
+        uint8_t* next_out = buf;
+        size_t next_len = got;
+
+        if (!staged && translate) {
+            rc = translate_buffer(ctx, buf, got, &next_out, &next_len, &prev_cr);
+            if (rc != ZU_STATUS_OK) {
+                break;
+            }
+        }
+
         if (zc) {
-            zu_zipcrypto_encrypt(zc, buf, got);
+            zu_zipcrypto_encrypt(zc, next_out, next_len);
         }
-        if (zu_write_output(ctx, buf, got) != ZU_STATUS_OK) {
-            if (!staged)
-                fclose(src);
-            return ZU_STATUS_IO;
+        if (zu_write_output(ctx, next_out, next_len) != ZU_STATUS_OK) {
+            rc = ZU_STATUS_IO;
+            if (!staged && translate && next_out != buf)
+                free(next_out);
+            break;
         }
-        written += got;
+        written += next_len;
+
+        if (!staged && translate && next_out != buf) {
+            free(next_out);
+        }
     }
+
+    if (rc != ZU_STATUS_OK) {
+        if (!staged)
+            fclose(src);
+        return rc;
+    }
+
     if (ferror(src)) {
         zu_context_set_error(ctx, ZU_STATUS_IO, "read failed while writing output");
         if (!staged)
@@ -1619,7 +1704,7 @@ static int write_stdin_staged_entry(ZContext* ctx,
     if (compress) {
         uint32_t crc_tmp = 0;
         uint64_t uncomp_tmp = 0, comp_tmp = 0;
-        rc = compress_to_temp(ctx, staged.path, method, ctx->compression_level, &staged_comp, &crc_tmp, &uncomp_tmp, &comp_tmp);
+        rc = compress_to_temp(ctx, staged.path, method, ctx->compression_level, &staged_comp, &crc_tmp, &uncomp_tmp, &comp_tmp, false);
         if (rc != ZU_STATUS_OK) {
             free_stdin_stage(&staged);
             return rc;
@@ -1706,7 +1791,7 @@ static int write_stdin_staged_entry(ZContext* ctx,
         goto cleanup;
     }
 
-    rc = write_file_data(ctx, staged.path, payload, payload_size, pzc);
+    rc = write_file_data(ctx, staged.path, payload, payload_size, pzc, false);
     if (rc != ZU_STATUS_OK) {
         goto cleanup;
     }
@@ -2126,7 +2211,13 @@ int zu_modify_archive(ZContext* ctx) {
                 zu_existing_entry* e = (zu_existing_entry*)ctx->existing_entries.items[j];
                 if (!e->delete && fnmatch(pattern, e->name, 0) == 0) {
                     if (time_filter_applied) {
-                        continue;
+                        time_t mtime = dos_to_unix_time(e->hdr.mod_date, e->hdr.mod_time);
+                        if (ctx->has_filter_after && mtime < ctx->filter_after) {
+                            continue;
+                        }
+                        if (ctx->has_filter_before && mtime >= ctx->filter_before) {
+                            continue;
+                        }
                     }
                     e->delete = true;
                     e->changed = true;
@@ -2135,7 +2226,7 @@ int zu_modify_archive(ZContext* ctx) {
                 }
             }
         }
-        if (time_filter_applied || delete_selected == 0) {
+        if (delete_selected == 0) {
             rc = ZU_STATUS_NO_FILES;
             if (!ctx->quiet && target_path) {
                 printf("\nzip error: Nothing to do! (%s)\n", target_path);
@@ -2188,6 +2279,7 @@ int zu_modify_archive(ZContext* ctx) {
     zu_entry_list entries = {0};
     uint64_t offset = 0;
     size_t added = 0;
+    bool skipped_by_update = false;
     uint64_t zip64_trigger = zip64_trigger_bytes();
     if (ctx->copy_mode) {
         added = copy_selected;
@@ -2272,14 +2364,25 @@ int zu_modify_archive(ZContext* ctx) {
                     uint16_t dos_time = 0, dos_date = 0;
                     msdos_datetime(&info.st, &dos_time, &dos_date);
 
-                    bool input_newer = true;
-                    if (dos_date < existing->hdr.mod_date || (dos_date == existing->hdr.mod_date && dos_time <= existing->hdr.mod_time)) {
-                        input_newer = false;
+                    bool process_entry = true;
+
+                    if (ctx->filesync) {
+                        bool time_differs = (dos_date != existing->hdr.mod_date || dos_time != existing->hdr.mod_time);
+                        bool size_differs = (info.st.st_size != (off_t)existing->hdr.uncomp_size);
+                        if (!time_differs && !size_differs) {
+                            process_entry = false;
+                        }
+                    }
+                    else {
+                        if (dos_date < existing->hdr.mod_date || (dos_date == existing->hdr.mod_date && dos_time <= existing->hdr.mod_time)) {
+                            process_entry = false;
+                        }
                     }
 
-                    if (!input_newer) {
+                    if (!process_entry) {
                         if (ctx->verbose || ctx->log_info || ctx->dry_run)
-                            zu_log(ctx, "skipping %s (not newer)\n", path);
+                            zu_log(ctx, "skipping %s (not newer/changed)\n", path);
+                        skipped_by_update = true;
                         if (info.link_target)
                             free(info.link_target);
                         free(allocated);
@@ -2335,10 +2438,18 @@ int zu_modify_archive(ZContext* ctx) {
                 }
             }
 
+            bool translate = false;
+            if (ctx->line_mode != ZU_LINE_NONE && !S_ISDIR(info.st.st_mode) && !is_symlink && !streaming && !info.is_stdin) {
+                if (file_is_likely_text(path)) {
+                    translate = true;
+                }
+            }
+
             const char* prefix = ctx->dry_run ? "plan" : (existing ? "updating" : "adding");
             const char* method_desc = compress ? compression_method_name(ctx->compression_method) : "store";
             if (ctx->verbose || ctx->log_info || ctx->dry_run) {
-                zu_log(ctx, "%s %s via %s%s%s\n", prefix, entry_name, method_desc, streaming ? " (streaming)" : "", is_symlink ? " [symlink]" : (S_ISDIR(info.st.st_mode) ? " [dir]" : ""));
+                zu_log(ctx, "%s %s via %s%s%s%s\n", prefix, entry_name, method_desc, streaming ? " (streaming)" : "", translate ? " (translated)" : "",
+                       is_symlink ? " [symlink]" : (S_ISDIR(info.st.st_mode) ? " [dir]" : ""));
             }
 
             if (ctx->dry_run) {
@@ -2392,7 +2503,7 @@ int zu_modify_archive(ZContext* ctx) {
                     compress = false;
 
                 if (compress) {
-                    rc = compress_to_temp(ctx, path, method, ctx->compression_level, &staged, &crc, &uncomp_size, &comp_size);
+                    rc = compress_to_temp(ctx, path, method, ctx->compression_level, &staged, &crc, &uncomp_size, &comp_size, translate);
                     if (rc == ZU_STATUS_OK && comp_size >= uncomp_size) {
                         fclose(staged);
                         staged = NULL;
@@ -2407,7 +2518,7 @@ int zu_modify_archive(ZContext* ctx) {
                     comp_size = uncomp_size;
                 }
                 else {
-                    rc = compute_crc_and_size(ctx, path, &crc, &uncomp_size);
+                    rc = compute_crc_and_size(ctx, path, &crc, &uncomp_size, translate);
                     comp_size = uncomp_size;
                 }
 
@@ -2503,7 +2614,7 @@ int zu_modify_archive(ZContext* ctx) {
                     rc = write_symlink_data(ctx, info.link_target ? info.link_target : "", info.link_target_len, pzc);
                 }
                 else {
-                    rc = write_file_data(ctx, path, staged, payload_size, pzc);
+                    rc = write_file_data(ctx, path, staged, payload_size, pzc, translate);
                 }
                 if (staged)
                     fclose(staged);
@@ -2583,7 +2694,16 @@ int zu_modify_archive(ZContext* ctx) {
 
     if (added == 0 && !ctx->difference_mode && !existing_changes && !ctx->zip_comment_specified && !ctx->set_archive_mtime) {
         rc = ZU_STATUS_NO_FILES;
-        if (!ctx->quiet && target_path && !ctx->update && !ctx->freshen) {
+        /* -FS returns 0 when fully synced; -u/-f return 12 when nothing done */
+        if (skipped_by_update && ctx->filesync) {
+            rc = ZU_STATUS_OK;
+        }
+
+        bool suppress_msg = (rc == ZU_STATUS_OK && !ctx->filesync);
+        if (!suppress_msg && !ctx->quiet && target_path && !ctx->update && !ctx->freshen) {
+            printf("\nzip error: Nothing to do! (%s)\n", target_path);
+        }
+        else if (ctx->filesync && !ctx->quiet && target_path) {
             printf("\nzip error: Nothing to do! (%s)\n", target_path);
         }
     }

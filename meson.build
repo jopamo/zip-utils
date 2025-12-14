@@ -82,6 +82,14 @@ unzip_exe = executable(
   install: true
 )
 
+# Create a zipinfo symlink to unzip for testing zipinfo behavior
+zipinfo_symlink = custom_target('zipinfo_symlink',
+  input: unzip_exe,
+  output: 'zipinfo',
+  command: ['ln', '-sf', unzip_exe.full_path(), '@OUTPUT@'],
+  build_by_default: true
+)
+
 #meson.add_install_script('build-aux/install-symlinks.sh')
 
 # --- Tests ---
@@ -337,20 +345,57 @@ test('integration-zipinfo', python3,
 
 # --- Generated Parity Tests ---
 
+parity_src = files('tests/parity/test_generated.c')
+
+if get_option('generate_parity')
+  sys_zip = find_program('zip')
+  sys_unzip = find_program('unzip')
+  sys_zipinfo = find_program('zipinfo')
+
+  gen_zip = custom_target('gen_zip_jsonl',
+    output: 'zip_runs.jsonl',
+    command: [
+      'sh', '-c',
+      '"$1" "$2" --zip "$3" --outdir "zip_gen" && mv "zip_gen/runs.jsonl" "$0"',
+      '@OUTPUT@', python3.full_path(), meson.project_source_root() / 'tools/document_zip_output.py', sys_zip.full_path()
+    ],
+    # console: true # console not supported in all meson versions for custom_target, omitting safely
+  )
+
+  gen_unzip = custom_target('gen_unzip_jsonl',
+    output: 'unzip_runs.jsonl',
+    command: [
+      'sh', '-c',
+      '"$1" "$2" --unzip "$3" --outdir "unzip_gen" && mv "unzip_gen/runs.jsonl" "$0"',
+      '@OUTPUT@', python3.full_path(), meson.project_source_root() / 'tools/document_unzip_output.py', sys_unzip.full_path()
+    ],
+  )
+
+  gen_zipinfo = custom_target('gen_zipinfo_jsonl',
+    output: 'zipinfo_runs.jsonl',
+    command: [
+      'sh', '-c',
+      '"$1" "$2" --zipinfo "$3" --outdir "zipinfo_gen" && mv "zipinfo_gen/runs.jsonl" "$0"',
+      '@OUTPUT@', python3.full_path(), meson.project_source_root() / 'tools/document_zipinfo_output.py', sys_zipinfo.full_path()
+    ],
+  )
+
+  parity_src = custom_target('test_generated.c',
+    output: 'test_generated.c',
+    input: [gen_zip, gen_unzip, gen_zipinfo],
+    command: [
+      python3, meson.project_source_root() / 'tools/convert_jsonl_to_c.py',
+      '@OUTPUT@', '@INPUT@'
+    ]
+  )
+endif
+
 parity_test_exe = executable(
   'test_parity_gen',
-  files('tests/parity/test_generated.c', 'tests/parity/common.c'),
-  include_directories: [inc_src],
+  [parity_src, files('tests/parity/common.c')],
+  include_directories: [inc_src, include_directories('tests/parity')],
   c_args: extra_c_args,
   link_args: extra_link_args
-)
-
-# Create a zipinfo symlink to unzip for testing zipinfo behavior
-zipinfo_symlink = custom_target('zipinfo_symlink',
-  input: unzip_exe,
-  output: 'zipinfo',
-  command: ['ln', '-sf', unzip_exe.full_path(), '@OUTPUT@'],
-  build_by_default: true
 )
 
 test('parity-generated', parity_test_exe,
@@ -359,5 +404,6 @@ test('parity-generated', parity_test_exe,
     'UNZIP_BIN': unzip_exe.full_path(),
     'ZIPINFO_BIN': zipinfo_symlink.full_path()
   },
+  depends: [zip_exe, unzip_exe, zipinfo_symlink],
   timeout: 60
 )

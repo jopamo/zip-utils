@@ -1302,6 +1302,7 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
                 continue;
             }
             if (strcmp(tok, "-@") == 0) {
+                ctx->stdin_names_read = true;
                 int rc = read_stdin_names(ctx);
                 if (rc != ZU_STATUS_OK)
                     return rc;
@@ -1372,6 +1373,12 @@ static int parse_zip_args(int argc, char** argv, ZContext* ctx, bool is_zipnote)
             return ZU_STATUS_USAGE;
         }
 
+        // Implicit mode consumes stdin for file data
+        if (ctx->stdin_names_read) {
+            zu_cli_error(g_tool_name, "cannot use -@ with implicit stdin-to-stdout mode");
+            return ZU_STATUS_USAGE;
+        }
+
         ctx->archive_path = "-";
         ctx->output_to_stdout = true;
         if (zu_strlist_push(&ctx->include, "-") != 0)
@@ -1433,7 +1440,7 @@ int main(int argc, char** argv) {
         ctx->verbose = true;
     }
 
-    emit_zip_stub_warnings(ctx);
+    // emit_zip_stub_warnings(ctx);
     trace_effective_zip_defaults(ctx);
     zu_cli_emit_option_trace(g_tool_name, ctx);
 

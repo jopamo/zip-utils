@@ -61,6 +61,15 @@ def main():
     else:
         sys_zip = shutil.which("zip") or "zip"
 
+    # Check if system zip is zip-utils (which doesn't write extras yet)
+    try:
+        ver = subprocess.run([sys_zip, "-v"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+        if "zip-utils" in ver.stdout or "zip-utils" in ver.stderr:
+            print("Skipping: system zip is zip-utils (missing extra fields generation)")
+            sys.exit(77)
+    except OSError:
+        pass
+
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
 

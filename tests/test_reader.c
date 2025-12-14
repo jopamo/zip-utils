@@ -30,11 +30,6 @@ static int write_file(const char* path, const char* payload) {
     return 0;
 }
 
-static bool file_exists(const char* path) {
-    struct stat st;
-    return stat(path, &st) == 0;
-}
-
 static int read_file_content(const char* path, char* buf, size_t bufsz) {
     FILE* fp = fopen(path, "rb");
     if (!fp)
@@ -129,8 +124,8 @@ static int test_basic_extract(void) {
     zu_strlist_free(&ctx->include_patterns);
     zu_strlist_free(&ctx->exclude);
     // Keep archive_path
-    ctx->target_dir = "extract";  // subdirectory to extract into
-    ctx->overwrite = true;        // allow overwrite
+    ctx->target_dir = "extract";                  // subdirectory to extract into
+    ctx->overwrite_policy = ZU_OVERWRITE_ALWAYS;  // allow overwrite
     ctx->quiet = true;
 
     // Create extraction directory
