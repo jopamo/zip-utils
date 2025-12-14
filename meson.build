@@ -119,6 +119,50 @@ test_fileio_exe = executable(
 )
 test('unit-fileio', test_fileio_exe)
 
+test_strlist_exe = executable(
+  'test_strlist',
+  files('tests/test_strlist.c'),
+  include_directories: [inc_src],
+  link_with: [libziputils],
+  dependencies: [zlib_dep],
+  c_args: extra_c_args,
+  link_args: extra_link_args
+)
+test('unit-strlist', test_strlist_exe)
+
+test_writer_exe = executable(
+  'test_writer',
+  files('tests/test_writer.c'),
+  include_directories: [inc_src],
+  link_with: [libziputils],
+  dependencies: [zlib_dep],
+  c_args: extra_c_args,
+  link_args: extra_link_args
+)
+test('unit-writer', test_writer_exe)
+
+test_reader_exe = executable(
+  'test_reader',
+  files('tests/test_reader.c'),
+  include_directories: [inc_src],
+  link_with: [libziputils],
+  dependencies: [zlib_dep],
+  c_args: extra_c_args,
+  link_args: extra_link_args
+)
+test('unit-reader', test_reader_exe)
+
+test_ctx_exe = executable(
+  'test_ctx',
+  files('tests/test_ctx.c'),
+  include_directories: [inc_src],
+  link_with: [libziputils],
+  dependencies: [zlib_dep],
+  c_args: extra_c_args,
+  link_args: extra_link_args
+)
+# test('unit-ctx', test_ctx_exe)  # disabled due to segfault
+
 python3 = import('python').find_installation('python3')
 test('integration-list', python3,
   args: [meson.project_source_root() / 'tests/test_list_integration.py'],

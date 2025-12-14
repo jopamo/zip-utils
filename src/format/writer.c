@@ -517,7 +517,7 @@ static bool should_compress_file(ZContext* ctx, const zu_input_info* info, const
         return false;
     }
     /* Store very small non-text files in fast-write mode to reduce overhead */
-    if (ctx->fast_write && info && info->size_known && (uint64_t)info->st.st_size <= (uint64_t)512) {
+    if (ctx->fast_write && info && info->size_known && (uint64_t)info->st.st_size <= (uint64_t)512 && (!path || !file_is_likely_text(path))) {
         return false;
     }
     if (ctx->fast_write && info && info->size_known) {

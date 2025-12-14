@@ -7,4 +7,5 @@
 tags
 build*
 /zip-doc-*/
-/comparison-docs/
+/comparison-docs*/
+/test-out/
