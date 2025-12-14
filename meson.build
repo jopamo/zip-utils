@@ -334,3 +334,22 @@ test('integration-zipinfo', python3,
   },
   timeout: 30
 )
+
+# --- Generated Parity Tests ---
+
+parity_test_exe = executable(
+  'test_parity_gen',
+  files('tests/test_parity_gen.c', 'tests/parity_common.c'),
+  include_directories: [inc_src],
+  c_args: extra_c_args,
+  link_args: extra_link_args
+)
+
+test('parity-generated', parity_test_exe,
+  env: {
+    'ZIP_BIN': zip_exe.full_path(),
+    'UNZIP_BIN': unzip_exe.full_path(),
+    'ZIPINFO_BIN': unzip_exe.full_path()
+  },
+  timeout: 60
+)
