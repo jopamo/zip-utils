@@ -51,22 +51,22 @@ run_doc() {
 }
 
 run_doc "zip baseline" \
-  python3 "$here/document_zip_output.py" --zip "$zip_system" --outdir "$out_base/zip-doc-system"
+  python3 "$here/tools/document_zip_output.py" --zip "$zip_system" --outdir "$out_base/zip-doc-system"
 
 run_doc "zip build" \
-  python3 "$here/document_zip_output.py" --zip "$zip_build_abs" --outdir "$out_base/zip-doc-build"
+  python3 "$here/tools/document_zip_output.py" --zip "$zip_build_abs" --outdir "$out_base/zip-doc-build"
 
 run_doc "unzip baseline" \
-  python3 "$here/document_unzip_output.py" --unzip "$unzip_system" --outdir "$out_base/unzip-doc-system"
+  python3 "$here/tools/document_unzip_output.py" --unzip "$unzip_system" --outdir "$out_base/unzip-doc-system"
 
 run_doc "unzip build" \
-  python3 "$here/document_unzip_output.py" --unzip "$unzip_build_abs" --outdir "$out_base/unzip-doc-build"
+  python3 "$here/tools/document_unzip_output.py" --unzip "$unzip_build_abs" --outdir "$out_base/unzip-doc-build"
 
 run_doc "zipinfo baseline" \
-  python3 "$here/document_zipinfo_output.py" --zipinfo "$zipinfo_system" --outdir "$out_base/zipinfo-doc-system"
+  python3 "$here/tools/document_zipinfo_output.py" --zipinfo "$zipinfo_system" --outdir "$out_base/zipinfo-doc-system"
 
 # zipinfo via unzip requires -Z
 run_doc "zipinfo build" \
-  python3 "$here/document_zipinfo_output.py" --zipinfo "$unzip_build_abs" --zipinfo-arg=-Z --outdir "$out_base/zipinfo-doc-build"
+  python3 "$here/tools/document_zipinfo_output.py" --zipinfo "$unzip_build_abs" --zipinfo-arg=-Z --outdir "$out_base/zipinfo-doc-build"
 
 echo "All comparison captures complete under $out_base/"
