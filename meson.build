@@ -165,7 +165,7 @@ test_ctx_exe = executable(
 
 python3 = import('python').find_installation('python3')
 test('integration-list', python3,
-  args: [meson.project_source_root() / 'tests/test_list_integration.py'],
+  args: [meson.project_source_root() / 'tests/integration/test_list_integration.py'],
   env: {
     'ZIP_BIN': 'zip',
     'UNZIP_BIN': 'unzip',
@@ -175,7 +175,7 @@ test('integration-list', python3,
 )
 
 test('integration-zip64', python3,
-  args: [meson.project_source_root() / 'tests/test_zip64_integration.py'],
+  args: [meson.project_source_root() / 'tests/integration/test_zip64_integration.py'],
   env: {
     'WRITE_BIN': zip_exe.full_path(),
     'UNZIP_REWRITE_BIN': unzip_exe.full_path()
@@ -184,7 +184,7 @@ test('integration-zip64', python3,
 )
 
 test('integration-zip64-large', python3,
-  args: [meson.project_source_root() / 'tests/test_zip64_large.py'],
+  args: [meson.project_source_root() / 'tests/integration/test_zip64_large.py'],
   env: {
     'WRITE_BIN': zip_exe.full_path(),
     'UNZIP_REWRITE_BIN': unzip_exe.full_path()
@@ -194,7 +194,7 @@ test('integration-zip64-large', python3,
 )
 
 test('integration-create', python3,
-  args: [meson.project_source_root() / 'tests/test_create_integration.py'],
+  args: [meson.project_source_root() / 'tests/integration/test_create_integration.py'],
   env: {
     'WRITE_BIN': zip_exe.full_path(),
     'UNZIP_BIN': 'unzip'
@@ -203,7 +203,7 @@ test('integration-create', python3,
 )
 
 test('integration-small-compression', python3,
-  args: [meson.project_source_root() / 'tests/test_small_file_compression.py'],
+  args: [meson.project_source_root() / 'tests/integration/test_small_file_compression.py'],
   env: {
     'WRITE_BIN': zip_exe.full_path()
   },
@@ -211,7 +211,7 @@ test('integration-small-compression', python3,
 )
 
 test('integration-streaming', python3,
-  args: [meson.project_source_root() / 'tests/test_streaming.py'],
+  args: [meson.project_source_root() / 'tests/integration/test_streaming.py'],
   env: {
     'WRITE_BIN': zip_exe.full_path()
   },
@@ -219,7 +219,7 @@ test('integration-streaming', python3,
 )
 
 test('integration-logging', python3,
-  args: [meson.project_source_root() / 'tests/test_logging.py'],
+  args: [meson.project_source_root() / 'tests/integration/test_logging.py'],
   env: {
     'WRITE_BIN': zip_exe.full_path()
   },
@@ -227,7 +227,7 @@ test('integration-logging', python3,
 )
 
 test('integration-strip-attrs', python3,
-  args: [meson.project_source_root() / 'tests/test_strip_attrs.py'],
+  args: [meson.project_source_root() / 'tests/integration/test_strip_attrs.py'],
   env: {
     'WRITE_BIN': zip_exe.full_path()
   },
@@ -235,7 +235,7 @@ test('integration-strip-attrs', python3,
 )
 
 test('integration-quiet-pager', python3,
-  args: [meson.project_source_root() / 'tests/test_quiet_pager.py'],
+  args: [meson.project_source_root() / 'tests/integration/test_quiet_pager.py'],
   env: {
     'WRITE_BIN': zip_exe.full_path(),
     'UNZIP_BIN': unzip_exe.full_path()
@@ -244,7 +244,7 @@ test('integration-quiet-pager', python3,
 )
 
 test('integration-zipnote-edit', python3,
-  args: [meson.project_source_root() / 'tests/test_zipnote_edit.py'],
+  args: [meson.project_source_root() / 'tests/integration/test_zipnote_edit.py'],
   env: {
     'WRITE_BIN': zip_exe.full_path(),
     'ZIPNOTE_BIN': zip_exe.full_path()
@@ -253,7 +253,7 @@ test('integration-zipnote-edit', python3,
 )
 
 test('integration-time-filtering', python3,
-  args: [meson.project_source_root() / 'tests/test_time_filtering.py'],
+  args: [meson.project_source_root() / 'tests/integration/test_time_filtering.py'],
   env: {
     'WRITE_BIN': zip_exe.full_path()
   },
@@ -261,7 +261,7 @@ test('integration-time-filtering', python3,
 )
 
 test('integration-output-copy', python3,
-  args: [meson.project_source_root() / 'tests/test_output_copy.py'],
+  args: [meson.project_source_root() / 'tests/integration/test_output_copy.py'],
   env: {
     'WRITE_BIN': zip_exe.full_path()
   },
@@ -269,7 +269,7 @@ test('integration-output-copy', python3,
 )
 
 test('integration-move', python3,
-  args: [meson.project_source_root() / 'tests/test_move_option.py'],
+  args: [meson.project_source_root() / 'tests/integration/test_move_option.py'],
   env: {
     'WRITE_BIN': zip_exe.full_path()
   },
@@ -277,7 +277,7 @@ test('integration-move', python3,
 )
 
 test('integration-option-parsing', python3,
-  args: [meson.project_source_root() / 'tests/test_option_parsing.py'],
+  args: [meson.project_source_root() / 'tests/integration/test_option_parsing.py'],
   env: {
     'WRITE_BIN': zip_exe.full_path()
   },
@@ -285,7 +285,7 @@ test('integration-option-parsing', python3,
 )
 
 test('integration-comments', python3,
-  args: [meson.project_source_root() / 'tests/test_comments.py'],
+  args: [meson.project_source_root() / 'tests/integration/test_comments.py'],
   env: {
     'WRITE_BIN': zip_exe.full_path()
   },
@@ -293,7 +293,7 @@ test('integration-comments', python3,
 )
 
 test('integration-comment-edit', python3,
-  args: [meson.project_source_root() / 'tests/test_comment_edit.py'],
+  args: [meson.project_source_root() / 'tests/integration/test_comment_edit.py'],
   env: {
     'WRITE_BIN': zip_exe.full_path()
   },
@@ -301,7 +301,7 @@ test('integration-comment-edit', python3,
 )
 
 test('integration-entry-comments', python3,
-  args: [meson.project_source_root() / 'tests/test_entry_comments.py'],
+  args: [meson.project_source_root() / 'tests/integration/test_entry_comments.py'],
   env: {
     'WRITE_BIN': zip_exe.full_path()
   },
@@ -309,7 +309,7 @@ test('integration-entry-comments', python3,
 )
 
 test('integration-unzip', python3,
-  args: [meson.project_source_root() / 'tests/test_unzip_integration.py'],
+  args: [meson.project_source_root() / 'tests/integration/test_unzip_integration.py'],
   env: {
     'ZIP_BIN': 'zip',
     'UNZIP_REWRITE_BIN': unzip_exe.full_path()
@@ -318,7 +318,7 @@ test('integration-unzip', python3,
 )
 
 test('integration-unzip-filter', python3,
-  args: [meson.project_source_root() / 'tests/test_unzip_filter.py'],
+  args: [meson.project_source_root() / 'tests/integration/test_unzip_filter.py'],
   env: {
     'ZIP_BIN': 'zip',
     'UNZIP_REWRITE_BIN': unzip_exe.full_path()
@@ -327,7 +327,7 @@ test('integration-unzip-filter', python3,
 )
 
 test('integration-zipinfo', python3,
-  args: [meson.project_source_root() / 'tests/test_zipinfo_integration.py'],
+  args: [meson.project_source_root() / 'tests/integration/test_zipinfo_integration.py'],
   env: {
     'ZIP_BIN': 'zip',
     'ZIPINFO_BIN': unzip_exe.full_path()
