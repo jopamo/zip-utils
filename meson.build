@@ -339,7 +339,7 @@ test('integration-zipinfo', python3,
 
 parity_test_exe = executable(
   'test_parity_gen',
-  files('tests/test_parity_gen.c', 'tests/parity_common.c'),
+  files('tests/parity/test_generated.c', 'tests/parity/common.c'),
   include_directories: [inc_src],
   c_args: extra_c_args,
   link_args: extra_link_args

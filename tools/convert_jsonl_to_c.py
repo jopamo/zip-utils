@@ -57,7 +57,7 @@ def main():
                     tests.append(test_case)
 
     with open(output_file, 'w') as f:
-        f.write('#include "parity_common.h"\n')
+        f.write('#include "common.h"\n')
         f.write('#include <stdio.h>\n')
         f.write('#include <string.h>\n')
         f.write('#include <stdlib.h>\n')
