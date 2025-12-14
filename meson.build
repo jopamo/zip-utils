@@ -330,7 +330,7 @@ test('integration-zipinfo', python3,
   args: [meson.project_source_root() / 'tests/integration/test_zipinfo_integration.py'],
   env: {
     'ZIP_BIN': 'zip',
-    'ZIPINFO_BIN': unzip_exe.full_path()
+    'ZIPINFO_BIN': zipinfo_symlink.full_path()
   },
   timeout: 30
 )
@@ -345,11 +345,19 @@ parity_test_exe = executable(
   link_args: extra_link_args
 )
 
+# Create a zipinfo symlink to unzip for testing zipinfo behavior
+zipinfo_symlink = custom_target('zipinfo_symlink',
+  input: unzip_exe,
+  output: 'zipinfo',
+  command: ['ln', '-sf', unzip_exe.full_path(), '@OUTPUT@'],
+  build_by_default: true
+)
+
 test('parity-generated', parity_test_exe,
   env: {
     'ZIP_BIN': zip_exe.full_path(),
     'UNZIP_BIN': unzip_exe.full_path(),
-    'ZIPINFO_BIN': unzip_exe.full_path()
+    'ZIPINFO_BIN': zipinfo_symlink.full_path()
   },
   timeout: 60
 )
