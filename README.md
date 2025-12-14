@@ -1,11 +1,19 @@
-# ZIP Utils
+<p align="center">
+  <img src="zip-utils.svg" alt="InfoZIP Utils logo" width="220">
+</p>
+
+# zip-utils
+
+[![CI with Clang + Sanitizers](https://github.com/jopamo/zip-utils/actions/workflows/ci.yml/badge.svg)](https://github.com/jopamo/zip-utils/actions/workflows/ci.yml)
+![Language](https://img.shields.io/badge/language-C-blue.svg)
+![Build System](https://img.shields.io/badge/build%20system-Meson-orange.svg)
 
 Modern rewrite of Info-ZIP's `zip`, `unzip`, and `zipinfo` with a reentrant core (`libziputils`) and thin CLIs aimed at drop-in compatibility.
 
 ## Scope and Compatibility
 - Targets Info-ZIP `zip` 3.0 / `unzip` 6.0 behavior; unsupported flags fail fast instead of silently diverging.
 - Library-first design: CLIs only parse args and populate `ZContext`, leaving core logic in `libziputils`.
-- Track parity gaps and flag coverage in `MISSING_FEATURES.md` and `OPTION_MATRIX.md`; protocol notes live in `zip-spec.md` and `unzip-spec.md`.
+- Track parity gaps and flag coverage in `CHECKLIST.md`; protocol notes live in `zip-spec.md` and `unzip-spec.md`.
 - Split archives are not supported; `-s`/`--split-size` and related options return a not-implemented error.
 
 ## Requirements
