@@ -136,6 +136,11 @@ typedef struct {
     uint32_t disk_start;
     char* comment;
     uint16_t comment_len;
+    time_t atime;
+    time_t mtime;
+    time_t ctime;
+    uint32_t uid;
+    uint32_t gid;
 } zu_writer_entry;
 
 typedef struct {
@@ -156,6 +161,108 @@ typedef struct {
 /* -------------------------------------------------------------------------
  * Helper Functions
  * ------------------------------------------------------------------------- */
+
+static int zu_write_output(ZContext* ctx, const void* ptr, size_t size);
+static void progress_log(ZContext* ctx, const char* fmt, ...);
+
+static uint16_t get_extra_len(const ZContext* ctx, bool zip64, bool is_lh, const zu_writer_entry* e) {
+    uint16_t len = 0;
+    if (zip64) {
+        if (is_lh) {
+            len += 4 + 2 * sizeof(uint64_t);
+        }
+        else if (e) {
+            uint16_t zv = 0;
+            if (e->uncomp_size >= 0xffffffffu || e->zip64)
+                zv++;
+            if (e->comp_size >= 0xffffffffu || e->zip64)
+                zv++;
+            if (e->lho_offset >= 0xffffffffu || e->zip64)
+                zv++;
+            if (zv > 0)
+                len += (uint16_t)(4 + zv * sizeof(uint64_t));
+        }
+    }
+    if (!ctx->exclude_extra_attrs) {
+        /* UT: 4 (header) + 1 (flags) + N*4 (timestamps) */
+        len += 4 + 1 + (is_lh ? 3 : 1) * 4;
+        /* Ux: 4 (header) + 1 (version) + 1 (uid size) + 4 (uid) + 1 (gid size) + 4 (gid) = 15 */
+        if (is_lh) {
+            len += 15;
+        }
+    }
+    return len;
+}
+
+static int write_extra_fields(ZContext* ctx, bool zip64, uint64_t uncomp_size, uint64_t comp_size, bool is_lh, const zu_writer_entry* e) {
+    if (zip64) {
+        uint16_t header_id = ZU_EXTRA_ZIP64;
+        if (is_lh) {
+            uint16_t data_len = 16;
+            uint64_t sizes[2] = {uncomp_size, comp_size};
+            if (zu_write_output(ctx, &header_id, 2) != ZU_STATUS_OK || zu_write_output(ctx, &data_len, 2) != ZU_STATUS_OK || zu_write_output(ctx, sizes, sizeof(sizes)) != ZU_STATUS_OK) {
+                return ZU_STATUS_IO;
+            }
+        }
+        else {
+            uint64_t zip64_vals[3];
+            uint16_t zv = 0;
+            if (e->uncomp_size >= 0xffffffffu || e->zip64)
+                zip64_vals[zv++] = e->uncomp_size;
+            if (e->comp_size >= 0xffffffffu || e->zip64)
+                zip64_vals[zv++] = e->comp_size;
+            if (e->lho_offset >= 0xffffffffu || e->zip64)
+                zip64_vals[zv++] = e->lho_offset;
+
+            if (zv > 0) {
+                uint16_t data_len = (uint16_t)(zv * sizeof(uint64_t));
+                if (zu_write_output(ctx, &header_id, 2) != ZU_STATUS_OK || zu_write_output(ctx, &data_len, 2) != ZU_STATUS_OK ||
+                    zu_write_output(ctx, zip64_vals, zv * sizeof(uint64_t)) != ZU_STATUS_OK) {
+                    return ZU_STATUS_IO;
+                }
+            }
+        }
+    }
+
+    if (!ctx->exclude_extra_attrs) {
+        /* UT: Extended Timestamp */
+        uint16_t ut_id = 0x5455;
+        uint16_t ut_len = 1 + (is_lh ? 3 : 1) * 4;
+        uint8_t ut_flags = is_lh ? 0x07 : 0x01; /* mtime, atime, ctime in LH; mtime only in CD */
+        if (zu_write_output(ctx, &ut_id, 2) != ZU_STATUS_OK || zu_write_output(ctx, &ut_len, 2) != ZU_STATUS_OK || zu_write_output(ctx, &ut_flags, 1) != ZU_STATUS_OK) {
+            return ZU_STATUS_IO;
+        }
+        uint32_t m = (uint32_t)e->mtime;
+        if (zu_write_output(ctx, &m, 4) != ZU_STATUS_OK) {
+            return ZU_STATUS_IO;
+        }
+        if (is_lh) {
+            uint32_t a = (uint32_t)e->atime;
+            uint32_t c = (uint32_t)e->ctime;
+            if (zu_write_output(ctx, &a, 4) != ZU_STATUS_OK || zu_write_output(ctx, &c, 4) != ZU_STATUS_OK) {
+                return ZU_STATUS_IO;
+            }
+        }
+
+        /* Ux: New Unix Extra Field (only in Local Header) */
+        if (is_lh) {
+            uint16_t ux_id = 0x7875;
+            uint16_t ux_len = 11;
+            uint8_t ux_ver = 1;
+            uint8_t uid_size = 4;
+            uint8_t gid_size = 4;
+            uint32_t uid = e->uid;
+            uint32_t gid = e->gid;
+            if (zu_write_output(ctx, &ux_id, 2) != ZU_STATUS_OK || zu_write_output(ctx, &ux_len, 2) != ZU_STATUS_OK || zu_write_output(ctx, &ux_ver, 1) != ZU_STATUS_OK ||
+                zu_write_output(ctx, &uid_size, 1) != ZU_STATUS_OK || zu_write_output(ctx, &uid, 4) != ZU_STATUS_OK || zu_write_output(ctx, &gid_size, 1) != ZU_STATUS_OK ||
+                zu_write_output(ctx, &gid, 4) != ZU_STATUS_OK) {
+                return ZU_STATUS_IO;
+            }
+        }
+    }
+
+    return ZU_STATUS_OK;
+}
 
 static void free_entries(zu_entry_list* list) {
     if (!list) {
@@ -1352,7 +1459,7 @@ static int write_streaming_entry(ZContext* ctx,
 
     uint16_t version_needed = header_zip64 ? 45 : (method == 0 ? 10 : 20);
 
-    uint16_t extra_len = header_zip64 ? (uint16_t)(4 + 2 * sizeof(uint64_t)) : 0;
+    uint16_t extra_len = get_extra_len(ctx, header_zip64, true, NULL);
 
     zu_local_header lho = {
         .signature = ZU_SIG_LOCAL,
@@ -1373,14 +1480,17 @@ static int write_streaming_entry(ZContext* ctx,
         return ZU_STATUS_IO;
     }
 
-    if (header_zip64) {
-        uint16_t header_id = ZU_EXTRA_ZIP64;
-        uint16_t data_len = 16;
-        uint64_t sizes[2] = {0, 0};
-        if (zu_write_output(ctx, &header_id, 2) != ZU_STATUS_OK || zu_write_output(ctx, &data_len, 2) != ZU_STATUS_OK || zu_write_output(ctx, sizes, sizeof(sizes)) != ZU_STATUS_OK) {
-            zu_context_set_error(ctx, ZU_STATUS_IO, "write Zip64 extra failed");
-            return ZU_STATUS_IO;
-        }
+    zu_writer_entry tmp_e = {
+        .mtime = info->st.st_mtime,
+        .atime = info->st.st_atime,
+        .ctime = info->st.st_ctime,
+        .uid = (uint32_t)info->st.st_uid,
+        .gid = (uint32_t)info->st.st_gid,
+    };
+
+    if (write_extra_fields(ctx, header_zip64, 0, 0, true, &tmp_e) != ZU_STATUS_OK) {
+        zu_context_set_error(ctx, ZU_STATUS_IO, "write extra fields failed");
+        return ZU_STATUS_IO;
     }
 
     zu_zipcrypto_ctx zc;
@@ -1649,6 +1759,11 @@ static int write_streaming_entry(ZContext* ctx,
     entries->items[entries->len].disk_start = entry_disk_start;
     entries->items[entries->len].comment = NULL;
     entries->items[entries->len].comment_len = 0;
+    entries->items[entries->len].mtime = info->st.st_mtime;
+    entries->items[entries->len].atime = info->st.st_atime;
+    entries->items[entries->len].ctime = info->st.st_ctime;
+    entries->items[entries->len].uid = (uint32_t)info->st.st_uid;
+    entries->items[entries->len].gid = (uint32_t)info->st.st_gid;
     if (existing && existing->comment && existing->comment_len > 0) {
         entries->items[entries->len].comment = malloc(existing->comment_len);
         if (!entries->items[entries->len].comment) {
@@ -1676,7 +1791,6 @@ static int write_stdin_staged_entry(ZContext* ctx,
                                     uint16_t dos_date,
                                     uint64_t entry_lho_offset,
                                     uint32_t entry_disk_start,
-                                    uint64_t zip64_trigger,
                                     const zu_existing_entry* existing,
                                     uint64_t* offset,
                                     zu_entry_list* entries) {
@@ -1738,25 +1852,28 @@ static int write_stdin_staged_entry(ZContext* ctx,
         comp_size += 12;
     }
 
+    uint64_t zip64_trigger = zip64_trigger_bytes();
+    bool zip64_lho = (uncomp_size >= zip64_trigger || comp_size >= zip64_trigger || entry_lho_offset >= zip64_trigger);
+
     uint32_t ext_attr = 0;
     uint16_t version_made = 20;
     make_attrs(ctx, &info->st, S_ISDIR(info->st.st_mode), &ext_attr, &version_made);
-    version_made = (uint16_t)((version_made & 0xff00u) | 30);
+    version_made = (uint16_t)((version_made & 0xff00u) | (zip64_lho ? 45 : 30));
     uint16_t int_attr = staged.is_text ? 1 : 0;
 
     size_t name_len = strlen(stored);
-    uint16_t extra_len = (uint16_t)(4 + 2 * sizeof(uint64_t));
+    uint16_t extra_len = get_extra_len(ctx, zip64_lho, true, NULL);
 
     zu_local_header lho = {
         .signature = ZU_SIG_LOCAL,
-        .version_needed = 45,
+        .version_needed = zip64_lho ? 45 : (method == 0 ? 10 : 20),
         .flags = flags,
         .method = method,
         .mod_time = dos_time,
         .mod_date = dos_date,
         .crc32 = crc,
-        .comp_size = 0xffffffffu,
-        .uncomp_size = 0xffffffffu,
+        .comp_size = zip64_lho ? 0xffffffffu : (uint32_t)comp_size,
+        .uncomp_size = zip64_lho ? 0xffffffffu : (uint32_t)uncomp_size,
         .name_len = (uint16_t)name_len,
         .extra_len = extra_len,
     };
@@ -1767,11 +1884,16 @@ static int write_stdin_staged_entry(ZContext* ctx,
         goto cleanup;
     }
 
-    uint16_t header_id = ZU_EXTRA_ZIP64;
-    uint16_t data_len = 16;
-    uint64_t sizes[2] = {uncomp_size, comp_size};
-    if (zu_write_output(ctx, &header_id, 2) != ZU_STATUS_OK || zu_write_output(ctx, &data_len, 2) != ZU_STATUS_OK || zu_write_output(ctx, sizes, sizeof(sizes)) != ZU_STATUS_OK) {
-        zu_context_set_error(ctx, ZU_STATUS_IO, "write Zip64 extra failed");
+    zu_writer_entry tmp_e = {
+        .mtime = info->st.st_mtime,
+        .atime = info->st.st_atime,
+        .ctime = info->st.st_ctime,
+        .uid = (uint32_t)info->st.st_uid,
+        .gid = (uint32_t)info->st.st_gid,
+    };
+
+    if (write_extra_fields(ctx, zip64_lho, uncomp_size, comp_size, true, &tmp_e) != ZU_STATUS_OK) {
+        zu_context_set_error(ctx, ZU_STATUS_IO, "write extra fields failed");
         rc = ZU_STATUS_IO;
         goto cleanup;
     }
@@ -1819,11 +1941,16 @@ static int write_stdin_staged_entry(ZContext* ctx,
     entries->items[entries->len].ext_attr = ext_attr;
     entries->items[entries->len].version_made = version_made;
     entries->items[entries->len].int_attr = int_attr;
-    entries->items[entries->len].zip64 = true;
+    entries->items[entries->len].zip64 = zip64_lho;
     entries->items[entries->len].flags = flags;
     entries->items[entries->len].disk_start = entry_disk_start;
     entries->items[entries->len].comment = NULL;
     entries->items[entries->len].comment_len = 0;
+    entries->items[entries->len].mtime = info->st.st_mtime;
+    entries->items[entries->len].atime = info->st.st_atime;
+    entries->items[entries->len].ctime = info->st.st_ctime;
+    entries->items[entries->len].uid = (uint32_t)info->st.st_uid;
+    entries->items[entries->len].gid = (uint32_t)info->st.st_gid;
     if (existing && existing->comment && existing->comment_len > 0) {
         entries->items[entries->len].comment = malloc(existing->comment_len);
         if (!entries->items[entries->len].comment) {
@@ -2011,27 +2138,18 @@ static int write_central_directory(ZContext* ctx, const zu_entry_list* entries, 
         size_t name_len = strlen(e->name);
 
         bool entry_zip64 = e->zip64;
-        bool need_uncomp64 = entry_zip64 || e->uncomp_size > UINT32_MAX;
-        bool need_comp64 = entry_zip64 || e->comp_size > UINT32_MAX;
-        bool need_off64 = entry_zip64 || e->lho_offset > UINT32_MAX;
+        bool need_uncomp64 = entry_zip64 || e->uncomp_size >= 0xffffffffu;
+        bool need_comp64 = entry_zip64 || e->comp_size >= 0xffffffffu;
+        bool need_off64 = entry_zip64 || e->lho_offset >= 0xffffffffu;
         bool need_zip64_extra = need_uncomp64 || need_comp64 || need_off64;
         if (entry_zip64 || need_zip64_extra)
             needs_zip64 = true;
-
-        uint64_t zip64_vals[3];
-        size_t zv = 0;
-        if (need_uncomp64)
-            zip64_vals[zv++] = e->uncomp_size;
-        if (need_comp64)
-            zip64_vals[zv++] = e->comp_size;
-        if (need_off64)
-            zip64_vals[zv++] = e->lho_offset;
 
         uint32_t comp32 = need_comp64 ? 0xffffffffu : (uint32_t)e->comp_size;
         uint32_t uncomp32 = need_uncomp64 ? 0xffffffffu : (uint32_t)e->uncomp_size;
         uint32_t offset32 = need_off64 ? 0xffffffffu : (uint32_t)e->lho_offset;
 
-        uint16_t extra_len = need_zip64_extra ? (uint16_t)(4 + zv * sizeof(uint64_t)) : 0;
+        uint16_t extra_len = get_extra_len(ctx, need_zip64_extra, false, e);
         uint16_t version_needed = (entry_zip64 || need_zip64_extra) ? 45 : (e->method == 0 ? 10 : 20);
         uint16_t comment_len = e->comment_len;
         uint16_t disk_start = (uint16_t)((e->disk_start > 0xffffu) ? 0xffffu : e->disk_start);
@@ -2059,14 +2177,11 @@ static int write_central_directory(ZContext* ctx, const zu_entry_list* entries, 
         if (zu_write_output(ctx, &ch, sizeof(ch)) != ZU_STATUS_OK || zu_write_output(ctx, e->name, name_len) != ZU_STATUS_OK) {
             return ZU_STATUS_IO;
         }
-        if (zv > 0) {
-            uint16_t header_id = ZU_EXTRA_ZIP64;
-            uint16_t data_len = (uint16_t)(zv * sizeof(uint64_t));
-            if (zu_write_output(ctx, &header_id, sizeof(header_id)) != ZU_STATUS_OK || zu_write_output(ctx, &data_len, sizeof(data_len)) != ZU_STATUS_OK ||
-                zu_write_output(ctx, zip64_vals, zv * sizeof(uint64_t)) != ZU_STATUS_OK) {
-                return ZU_STATUS_IO;
-            }
+
+        if (write_extra_fields(ctx, need_zip64_extra, e->uncomp_size, e->comp_size, false, e) != ZU_STATUS_OK) {
+            return ZU_STATUS_IO;
         }
+
         if (comment_len > 0 && !e->comment) {
             zu_context_set_error(ctx, ZU_STATUS_IO, "entry comment missing");
             return ZU_STATUS_IO;
@@ -2470,7 +2585,7 @@ int zu_modify_archive(ZContext* ctx) {
 
             if (streaming) {
                 if (info.is_stdin) {
-                    rc = write_stdin_staged_entry(ctx, entry_name, &info, dos_time, dos_date, entry_lho_offset, entry_disk_start, zip64_trigger, existing, &offset, &entries);
+                    rc = write_stdin_staged_entry(ctx, entry_name, &info, dos_time, dos_date, entry_lho_offset, entry_disk_start, existing, &offset, &entries);
                 }
                 else {
                     rc = write_streaming_entry(ctx, path, entry_name, &info, dos_time, dos_date, entry_lho_offset, entry_disk_start, zip64_trigger, existing, &offset, &entries);
@@ -2546,7 +2661,7 @@ int zu_modify_archive(ZContext* ctx) {
             }
 
             bool zip64_lho = (comp_size >= zip64_trigger || uncomp_size >= zip64_trigger || offset >= zip64_trigger);
-            uint16_t extra_len = zip64_lho ? (uint16_t)(4 + 2 * sizeof(uint64_t)) : 0;
+            uint16_t extra_len = get_extra_len(ctx, zip64_lho, true, NULL);
             uint16_t version_needed = zip64_lho ? 45 : (method == 0 ? 10 : 20);
             size_t name_len = strlen(entry_name);
 
@@ -2581,19 +2696,22 @@ int zu_modify_archive(ZContext* ctx) {
                 goto cleanup;
             }
 
-            if (zip64_lho) {
-                uint16_t header_id2 = ZU_EXTRA_ZIP64;
-                uint16_t data_len2 = 16;
-                uint64_t sizes2[2] = {uncomp_size, comp_size};
-                if (zu_write_output(ctx, &header_id2, 2) != ZU_STATUS_OK || zu_write_output(ctx, &data_len2, 2) != ZU_STATUS_OK || zu_write_output(ctx, sizes2, 16) != ZU_STATUS_OK) {
-                    zu_context_set_error(ctx, ZU_STATUS_IO, "write Zip64 extra failed");
-                    rc = ZU_STATUS_IO;
-                    if (staged)
-                        fclose(staged);
-                    if (info.link_target)
-                        free(info.link_target);
-                    goto cleanup;
-                }
+            zu_writer_entry tmp_e = {
+                .mtime = info.st.st_mtime,
+                .atime = info.st.st_atime,
+                .ctime = info.st.st_ctime,
+                .uid = (uint32_t)info.st.st_uid,
+                .gid = (uint32_t)info.st.st_gid,
+            };
+
+            if (write_extra_fields(ctx, zip64_lho, uncomp_size, comp_size, true, &tmp_e) != ZU_STATUS_OK) {
+                zu_context_set_error(ctx, ZU_STATUS_IO, "write extra fields failed");
+                rc = ZU_STATUS_IO;
+                if (staged)
+                    fclose(staged);
+                if (info.link_target)
+                    free(info.link_target);
+                goto cleanup;
             }
 
             if (ctx->encrypt && ctx->password) {
@@ -2662,6 +2780,11 @@ int zu_modify_archive(ZContext* ctx) {
             entries.items[entries.len].disk_start = entry_disk_start;
             entries.items[entries.len].comment = NULL;
             entries.items[entries.len].comment_len = 0;
+            entries.items[entries.len].mtime = info.st.st_mtime;
+            entries.items[entries.len].atime = info.st.st_atime;
+            entries.items[entries.len].ctime = info.st.st_ctime;
+            entries.items[entries.len].uid = (uint32_t)info.st.st_uid;
+            entries.items[entries.len].gid = (uint32_t)info.st.st_gid;
             if (existing && existing->comment && existing->comment_len > 0) {
                 entries.items[entries.len].comment = malloc(existing->comment_len);
                 if (!entries.items[entries.len].comment) {

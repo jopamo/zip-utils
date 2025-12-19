@@ -9,3 +9,6 @@ build*
 /zip-doc-*/
 /comparison-docs*/
 /test-out/
+AGENTS.md
+CLAUDE.md
+GEMINI.md

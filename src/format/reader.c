@@ -65,6 +65,19 @@ typedef struct {
 } zu_zip64_extra;
 
 typedef struct {
+    time_t atime;
+    time_t mtime;
+    time_t ctime;
+    bool has_atime;
+    bool has_mtime;
+    bool has_ctime;
+    uint32_t uid;
+    uint32_t gid;
+    bool has_uid;
+    bool has_gid;
+} zu_extra_fields;
+
+typedef struct {
     uint64_t cd_offset;
     uint64_t entries_total;
 } zu_cd_info;
@@ -683,6 +696,84 @@ static char* build_output_path(const ZContext* ctx, const char* name) {
     return out;
 }
 
+static void parse_extra_fields(const unsigned char* extra, uint16_t extra_len, zu_extra_fields* out) {
+    if (!extra || extra_len == 0 || !out)
+        return;
+
+    memset(out, 0, sizeof(*out));
+
+    size_t pos = 0;
+    while (pos + 4 <= extra_len) {
+        uint16_t tag = 0;
+        uint16_t sz = 0;
+        memcpy(&tag, extra + pos, 2);
+        memcpy(&sz, extra + pos + 2, 2);
+        pos += 4;
+
+        if (pos + sz > extra_len)
+            break;
+
+        if (tag == 0x5455) { /* UT: Extended Timestamp */
+            if (sz >= 1) {
+                uint8_t flags = extra[pos];
+                size_t off = 1;
+                if ((flags & 1) && off + 4 <= sz) {
+                    uint32_t t = 0;
+                    memcpy(&t, extra + pos + off, 4);
+                    out->mtime = (time_t)t;
+                    out->has_mtime = true;
+                    off += 4;
+                }
+                if ((flags & 2) && off + 4 <= sz) {
+                    uint32_t t = 0;
+                    memcpy(&t, extra + pos + off, 4);
+                    out->atime = (time_t)t;
+                    out->has_atime = true;
+                    off += 4;
+                }
+                if ((flags & 4) && off + 4 <= sz) {
+                    uint32_t t = 0;
+                    memcpy(&t, extra + pos + off, 4);
+                    out->ctime = (time_t)t;
+                    out->has_ctime = true;
+                    off += 4;
+                }
+            }
+        }
+        else if (tag == 0x7875) { /* Ux: Info-ZIP Unix UID/GID */
+            if (sz >= 1) {
+                uint8_t ver = extra[pos];
+                if (ver == 1) {
+                    size_t off = 1;
+                    if (off + 1 <= sz) {
+                        uint8_t uid_size = extra[pos + off];
+                        off++;
+                        if (uid_size == 4 && off + 4 <= sz) {
+                            memcpy(&out->uid, extra + pos + off, 4);
+                            out->has_uid = true;
+                            off += 4;
+                        }
+                        else {
+                            off += uid_size;
+                        }
+                    }
+                    if (off + 1 <= sz) {
+                        uint8_t gid_size = extra[pos + off];
+                        off++;
+                        if (gid_size == 4 && off + 4 <= sz) {
+                            memcpy(&out->gid, extra + pos + off, 4);
+                            out->has_gid = true;
+                            off += 4;
+                        }
+                    }
+                }
+            }
+        }
+
+        pos += sz;
+    }
+}
+
 /*
  * Resolve Zip64 sizes from the Zip64 extra field
  *
@@ -928,7 +1019,15 @@ static int zi_print_verbose_entry(const ZContext* ctx,
             uint16_t sz = 0;
             memcpy(&tag, extra + pos, 2);
             memcpy(&sz, extra + pos + 2, 2);
-            if (zi_print_line(ctx, line_count, "      tag 0x%04x (%u bytes)\n", tag, sz) != 0)
+            const char* tag_name = "";
+            if (tag == 0x5455)
+                tag_name = " (UT)";
+            else if (tag == 0x7875)
+                tag_name = " (Ux)";
+            else if (tag == 0x0001)
+                tag_name = " (Zip64)";
+
+            if (zi_print_line(ctx, line_count, "      tag 0x%04x%s (%u bytes)\n", tag, tag_name, sz) != 0)
                 return 1;
             pos += 4 + sz;
         }
@@ -964,6 +1063,10 @@ static int zi_print_verbose_entry(const ZContext* ctx,
 static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, const char* name, bool test_only, uint64_t comp_size, uint64_t uncomp_size, uint64_t lho_offset) {
     size_t name_len = strlen(name);
     bool is_dir = name_len > 0 && name[name_len - 1] == '/';
+    int rc = ZU_STATUS_OK;
+    char* out_path = NULL;
+    uint32_t crc = 0;
+    uint64_t written = 0;
 
     if (path_has_traversal(name)) {
         zu_context_set_error(ctx, ZU_STATUS_USAGE, "unsafe path in archive entry");
@@ -982,39 +1085,78 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
         return ZU_STATUS_IO;
     }
 
-    off_t data_offset = (off_t)lho_offset + (off_t)sizeof(lho) + lho.name_len + lho.extra_len;
-    if (fseeko(ctx->in_file, data_offset, SEEK_SET) != 0) {
-        zu_context_set_error(ctx, ZU_STATUS_IO, "seek to file data failed");
+    if (fseeko(ctx->in_file, (off_t)lho.name_len, SEEK_CUR) != 0) {
+        zu_context_set_error(ctx, ZU_STATUS_IO, "seek past filename failed");
         return ZU_STATUS_IO;
+    }
+
+    unsigned char* lho_extra = NULL;
+    if (lho.extra_len > 0) {
+        lho_extra = malloc(lho.extra_len);
+        if (!lho_extra) {
+            zu_context_set_error(ctx, ZU_STATUS_OOM, "allocating lho extra failed");
+            return ZU_STATUS_OOM;
+        }
+        if (fread(lho_extra, 1, lho.extra_len, ctx->in_file) != lho.extra_len) {
+            free(lho_extra);
+            zu_context_set_error(ctx, ZU_STATUS_IO, "reading lho extra failed");
+            return ZU_STATUS_IO;
+        }
+    }
+
+    zu_extra_fields ef;
+    memset(&ef, 0, sizeof(ef));
+    if (lho_extra) {
+        parse_extra_fields(lho_extra, lho.extra_len, &ef);
     }
 
     if (is_dir) {
         if (!test_only) {
-            if (ctx->output_to_stdout)
-                return ZU_STATUS_OK;
+            if (ctx->output_to_stdout) {
+                rc = ZU_STATUS_OK;
+                goto cleanup;
+            }
 
-            if (!ctx->store_paths)
-                return ZU_STATUS_OK;
+            if (!ctx->store_paths) {
+                rc = ZU_STATUS_OK;
+                goto cleanup;
+            }
 
-            char* out_path = build_output_path(ctx, name);
-            if (!out_path) {
+            char* dir_path = build_output_path(ctx, name);
+            if (!dir_path) {
                 zu_context_set_error(ctx, ZU_STATUS_OOM, "allocating output path failed");
-                return ZU_STATUS_OOM;
+                rc = ZU_STATUS_OOM;
+                goto cleanup;
             }
 
-            size_t out_len = strlen(out_path);
-            if (out_len > 0 && out_path[out_len - 1] == '/') {
-                out_path[out_len - 1] = '\0';
+            size_t out_len = strlen(dir_path);
+            if (out_len > 0 && dir_path[out_len - 1] == '/') {
+                dir_path[out_len - 1] = '\0';
             }
 
-            int dir_rc = ensure_dir(out_path);
-            free(out_path);
+            int dir_rc = ensure_dir(dir_path);
+            if (dir_rc == ZU_STATUS_OK) {
+                if (ef.has_uid || ef.has_gid) {
+                    (void)lchown(dir_path, ef.has_uid ? (uid_t)ef.uid : (uid_t)-1, ef.has_gid ? (gid_t)ef.gid : (gid_t)-1);
+                }
+                struct timeval times[2];
+                time_t mtime = ef.has_mtime ? ef.mtime : dos_to_unix_time(hdr->mod_date, hdr->mod_time);
+                time_t atime = ef.has_atime ? ef.atime : mtime;
+                times[0].tv_sec = atime;
+                times[0].tv_usec = 0;
+                times[1].tv_sec = mtime;
+                times[1].tv_usec = 0;
+                (void)utimes(dir_path, times);
+            }
+            free(dir_path);
             if (dir_rc != ZU_STATUS_OK) {
                 zu_context_set_error(ctx, dir_rc, "creating directory failed");
-                return dir_rc;
+                rc = dir_rc;
+                goto cleanup;
             }
         }
-        return ZU_STATUS_OK;
+        rc = ZU_STATUS_OK;
+        goto cleanup;
     }
 
     bool encrypted = (hdr->flags & 1) != 0;
@@ -1055,11 +1197,7 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
         return ZU_STATUS_OOM;
     }
 
-    uint32_t crc = 0;
-    uint64_t written = 0;
-
     FILE* fp = NULL;
-    char* out_path = NULL;
 
     if (!test_only) {
         if (!ctx->quiet)
@@ -1188,8 +1326,6 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
             }
         }
     }
-
-    int rc = ZU_STATUS_OK;
 
     if (hdr->method == 0) {
         uint64_t remaining = comp_size;
@@ -1385,6 +1521,10 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
         fclose(fp);
 
         if (rc == ZU_STATUS_OK) {
+            if (ef.has_uid || ef.has_gid) {
+                (void)lchown(out_path, ef.has_uid ? (uid_t)ef.uid : (uid_t)-1, ef.has_gid ? (gid_t)ef.gid : (gid_t)-1);
+            }
+
             mode_t mode = (mode_t)((hdr->ext_attr >> 16) & 0xffff);
             if (mode != 0) {
                 if (chmod(out_path, mode) != 0) {
@@ -1394,9 +1534,10 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
             }
 
             if (rc == ZU_STATUS_OK) {
-                time_t mtime = dos_to_unix_time(hdr->mod_date, hdr->mod_time);
+                time_t mtime = ef.has_mtime ? ef.mtime : dos_to_unix_time(hdr->mod_date, hdr->mod_time);
+                time_t atime = ef.has_atime ? ef.atime : mtime;
                 struct timeval times[2];
-                times[0].tv_sec = mtime;
+                times[0].tv_sec = atime;
                 times[0].tv_usec = 0;
                 times[1].tv_sec = mtime;
                 times[1].tv_usec = 0;
@@ -1409,7 +1550,9 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
         }
     }
 
+cleanup:
     free(out_path);
+    free(lho_extra);
 
     if (rc != ZU_STATUS_OK)
         return rc;
