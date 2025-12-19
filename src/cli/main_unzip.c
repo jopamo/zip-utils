@@ -288,13 +288,13 @@ static int parse_unzip_args(int argc, char** argv, ZContext* ctx) {
 
             case 'L':
                 // Lowercasing is explicitly unsupported by spec
-                // zu_cli_warn(g_tool_name, "option -L (lowercase names) is not supported");
-                break;
+                zu_cli_error(g_tool_name, "option -L (lowercase names) is not supported");
+                return ZU_STATUS_USAGE;
 
             case 'X':
                 // UID/GID restoration is explicitly unsupported by spec
-                // zu_cli_warn(g_tool_name, "option -X (restore UID/GID) is not supported");
-                break;
+                zu_cli_error(g_tool_name, "option -X (restore UID/GID) is not supported");
+                return ZU_STATUS_USAGE;
 
             case 'v':
                 // For compatibility, -v acts like zipinfo verbose listing
@@ -313,8 +313,8 @@ static int parse_unzip_args(int argc, char** argv, ZContext* ctx) {
 
             case 'C':
                 // Case-insensitive matching is explicitly unsupported by spec
-                // zu_cli_warn(g_tool_name, "option -C (case-insensitive) is not supported");
-                break;
+                zu_cli_error(g_tool_name, "option -C (case-insensitive) is not supported");
+                return ZU_STATUS_USAGE;
 
             case 'i':
                 // Add an include pattern, restricting matches to this set
@@ -508,11 +508,7 @@ static int parse_unzip_args(int argc, char** argv, ZContext* ctx) {
         }
     }
 
-    // Reject "-" as archive path (stdin not supported)
-    if (ctx->archive_path && strcmp(ctx->archive_path, "-") == 0) {
-        print_usage(stderr, argv[0]);
-        return ZU_STATUS_USAGE;
-    }
+    // "-" as archive path (stdin) is allowed and passed to execution layer
 
     // Support for reading the archive from stdin is intentionally incomplete here
 

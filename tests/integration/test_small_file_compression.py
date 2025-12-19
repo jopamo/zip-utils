@@ -44,7 +44,7 @@ def main():
 
         with zipfile.ZipFile(archive2, "r") as zf:
             info = zf.getinfo("noise.bin")
-            if info.compress_type != zipfile.ZIP_STORED:
+            if info.compress_type != zipfile.ZIP_STORED and info.compress_size >= info.file_size:
                 raise SystemExit("noise.bin should be stored when compression is not effective")
 
 

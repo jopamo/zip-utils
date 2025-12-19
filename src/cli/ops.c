@@ -189,6 +189,10 @@ int zu_zip_run(ZContext* ctx) {
 
     // 3) Modification requires either file operands or an explicit comment read
     if (ctx->include.len == 0 && !ctx->zip_comment_specified) {
+        if (ctx->stdin_names_read) {
+            fprintf(stderr, "zip: error: no input files specified\n");
+            return ZU_STATUS_USAGE;
+        }
         printf("zip error: Nothing to do! (%s)\n", ctx->archive_path ? ctx->archive_path : "");
         return ZU_STATUS_NO_FILES;
     }
