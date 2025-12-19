@@ -42,7 +42,8 @@ core_sources = files(
   'src/compression/crc32.c',
   'src/compression/zipcrypto.c',
   'src/format/reader.c',
-  'src/format/writer.c'
+  'src/format/writer.c',
+  'src/format/recovery.c'
 )
 
 zlib_dep = dependency('zlib')
@@ -159,6 +160,17 @@ test_reader_exe = executable(
   link_args: extra_link_args
 )
 test('unit-reader', test_reader_exe)
+
+test_recovery_exe = executable(
+  'test_recovery',
+  files('tests/test_recovery.c'),
+  include_directories: [inc_src],
+  link_with: [libziputils],
+  dependencies: [zlib_dep],
+  c_args: extra_c_args,
+  link_args: extra_link_args
+)
+test('unit-recovery', test_recovery_exe)
 
 test_ctx_exe = executable(
   'test_ctx',

@@ -393,6 +393,8 @@ static int zi_print_entry(const ZContext* ctx, size_t* line_count, const zu_cent
     }
 }
 
+#include "recovery.h"
+
 /*
  * Find the EOCD signature by scanning backwards from end-of-file
  *
@@ -439,159 +441,6 @@ static int find_eocd(FILE* f, off_t* pos_out) {
 
     free(buf);
     return -1;
-}
-
-/*
- * Best-effort central directory recovery used by -FF mode
- *
- * Strategy
- * - Scan the file sequentially for local file header signatures
- * - For each local header, read the filename and capture metadata needed to
- *   synthesize a "central directory" view in ctx->existing_entries
- *
- * Caveats
- * - Entries using data descriptors do not store sizes in the local header
- * - This function attempts to estimate sizes by looking at the next local header offset
- * - Extra field lengths matter for correct size estimation, so they must be tracked
- *
- * Output
- * - Populates ctx->existing_entries with zu_existing_entry objects
- * - Returns OK if at least one entry was recovered
- */
-static int zu_recover_central_directory(ZContext* ctx) {
-    if (ctx->verbose)
-        zu_log(ctx, "Scanning for local headers (-FF)...\n");
-
-    if (fseeko(ctx->in_file, 0, SEEK_SET) != 0)
-        return ZU_STATUS_IO;
-
-    uint8_t buf[ZU_IO_CHUNK];
-    off_t current = 0;
-    size_t got;
-    int entries_found = 0;
-
-    while ((got = fread(buf, 1, sizeof(buf), ctx->in_file)) > 0) {
-        if (got < 4)
-            break;
-
-        for (size_t i = 0; i < got - 3; ++i) {
-            uint32_t s;
-            memcpy(&s, buf + i, 4);
-            if (s != ZU_SIG_LOCAL)
-                continue;
-
-            off_t lho_offset = current + (off_t)i;
-
-            if (fseeko(ctx->in_file, lho_offset, SEEK_SET) != 0)
-                break;
-
-            zu_local_header lho;
-            if (fread(&lho, 1, sizeof(lho), ctx->in_file) != sizeof(lho))
-                break;
-
-            char* name = malloc(lho.name_len + 1);
-            if (!name)
-                return ZU_STATUS_OOM;
-
-            if (fread(name, 1, lho.name_len, ctx->in_file) != lho.name_len) {
-                free(name);
-                break;
-            }
-            name[lho.name_len] = '\0';
-
-            if (fseeko(ctx->in_file, lho.extra_len, SEEK_CUR) != 0) {
-                free(name);
-                break;
-            }
-
-            uint64_t comp_size = lho.comp_size;
-            uint64_t uncomp_size = lho.uncomp_size;
-
-            if (lho.flags & 8) {
-                comp_size = 0;
-            }
-
-            zu_existing_entry* entry = calloc(1, sizeof(zu_existing_entry));
-            if (!entry) {
-                free(name);
-                return ZU_STATUS_OOM;
-            }
-
-            entry->hdr.signature = ZU_SIG_CENTRAL;
-            entry->hdr.version_made = 20;
-            entry->hdr.version_needed = lho.version_needed;
-            entry->hdr.flags = lho.flags;
-            entry->hdr.method = lho.method;
-            entry->hdr.mod_time = lho.mod_time;
-            entry->hdr.mod_date = lho.mod_date;
-            entry->hdr.crc32 = lho.crc32;
-            entry->hdr.comp_size = (uint32_t)comp_size;
-            entry->hdr.uncomp_size = (uint32_t)uncomp_size;
-            entry->hdr.name_len = lho.name_len;
-            entry->hdr.extra_len = lho.extra_len;
-            entry->hdr.lho_offset = (uint32_t)lho_offset;
-
-            entry->name = name;
-            entry->comp_size = comp_size;
-            entry->uncomp_size = uncomp_size;
-            entry->lho_offset = (uint64_t)lho_offset;
-
-            if (ctx->existing_entries.len == ctx->existing_entries.cap) {
-                size_t new_cap = ctx->existing_entries.cap == 0 ? 16 : ctx->existing_entries.cap * 2;
-                char** new_items = realloc(ctx->existing_entries.items, new_cap * sizeof(char*));
-                if (!new_items) {
-                    free(name);
-                    free(entry);
-                    return ZU_STATUS_OOM;
-                }
-                ctx->existing_entries.items = new_items;
-                ctx->existing_entries.cap = new_cap;
-            }
-            ctx->existing_entries.items[ctx->existing_entries.len++] = (char*)entry;
-            entries_found++;
-
-            if (!(lho.flags & 8) && comp_size > 0) {
-                fseeko(ctx->in_file, (off_t)comp_size, SEEK_CUR);
-            }
-
-            current = ftello(ctx->in_file);
-            i = (size_t)-1;
-            got = fread(buf, 1, sizeof(buf), ctx->in_file);
-            if (got < 4) {
-                got = 0;
-                break;
-            }
-        }
-
-        if (got == 0)
-            break;
-
-        current += (off_t)got - 3;
-        fseeko(ctx->in_file, current, SEEK_SET);
-    }
-
-    // Fix up unknown sizes for data-descriptor entries using next header boundary
-    for (size_t k = 0; k < ctx->existing_entries.len; ++k) {
-        zu_existing_entry* e = (zu_existing_entry*)ctx->existing_entries.items[k];
-        if ((e->hdr.flags & 8) && e->comp_size == 0) {
-            uint64_t next_offset = 0;
-            if (k + 1 < ctx->existing_entries.len) {
-                next_offset = ((zu_existing_entry*)ctx->existing_entries.items[k + 1])->lho_offset;
-            }
-            else {
-                fseeko(ctx->in_file, 0, SEEK_END);
-                next_offset = (uint64_t)ftello(ctx->in_file);
-            }
-
-            uint64_t start_data = e->lho_offset + 30 + e->hdr.name_len + e->hdr.extra_len;
-            if (start_data < next_offset) {
-                e->comp_size = next_offset - start_data;
-                e->hdr.comp_size = (uint32_t)e->comp_size;
-            }
-        }
-    }
-
-    return entries_found > 0 ? ZU_STATUS_OK : ZU_STATUS_IO;
 }
 
 /*
@@ -1890,10 +1739,17 @@ int zu_load_central_directory(ZContext* ctx) {
         return rc;
 
     zu_cd_info cdinfo;
+
+    // For -FF, skip straight to recovery
+    if (ctx->fix_fix_archive) {
+        return zu_recover_central_directory(ctx, true);
+    }
+
     rc = read_cd_info(ctx, &cdinfo, true);
     if (rc != ZU_STATUS_OK) {
-        if (ctx->fix_fix_archive) {
-            return zu_recover_central_directory(ctx);
+        // For -F, try recovery if normal read fails
+        if (ctx->fix_archive) {
+            return zu_recover_central_directory(ctx, false);
         }
         zu_close_files(ctx);
         return rc;

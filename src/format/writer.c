@@ -1185,6 +1185,11 @@ static int copy_fast_path(ZContext* ctx, uint64_t start_offset, uint64_t total_l
             zu_context_set_error(ctx, ZU_STATUS_IO, "sendfile failed");
             return ZU_STATUS_IO;
         }
+        if (sent == 0) {
+            /* EOF reached before expected size */
+            zu_context_set_error(ctx, ZU_STATUS_IO, "short read during sendfile");
+            return ZU_STATUS_IO;
+        }
         remaining -= (uint64_t)sent;
         ctx->current_offset += (uint64_t)sent;
     }
@@ -1344,6 +1349,7 @@ static int write_streaming_entry(ZContext* ctx,
     size_t name_len = strlen(stored);
 
     bool header_zip64 = size_unknown || *offset >= zip64_trigger || size_hint >= zip64_trigger;
+
     uint16_t version_needed = header_zip64 ? 45 : (method == 0 ? 10 : 20);
 
     uint16_t extra_len = header_zip64 ? (uint16_t)(4 + 2 * sizeof(uint64_t)) : 0;
@@ -2692,7 +2698,7 @@ int zu_modify_archive(ZContext* ctx) {
         }
     }
 
-    if (added == 0 && !ctx->difference_mode && !existing_changes && !ctx->zip_comment_specified && !ctx->set_archive_mtime) {
+    if (added == 0 && !ctx->difference_mode && !existing_changes && !ctx->zip_comment_specified && !ctx->set_archive_mtime && !ctx->fix_archive && !ctx->fix_fix_archive) {
         rc = ZU_STATUS_NO_FILES;
         /* -FS returns 0 when fully synced; -u/-f return 12 when nothing done */
         if (skipped_by_update && ctx->filesync) {

@@ -145,20 +145,6 @@ static int map_exit_code(int status) {
 }
 
 /*
- * Emit warnings for options that are accepted but not fully implemented
- *
- * This is intentionally centralized so parsing logic can focus on state mutation
- * and the user sees a single consolidated notice instead of repeated messages
- */
-static void emit_zip_stub_warnings(ZContext* ctx) {
-    if (ctx->fix_archive || ctx->fix_fix_archive) {
-        char buf[256];
-        snprintf(buf, sizeof(buf), "%s is stubbed (Info-ZIP parity pending): %s", ctx->fix_fix_archive ? "-FF" : "-F", "recovery semantics are still under validation");
-        zu_warn_once(ctx, buf);
-    }
-}
-
-/*
  * Map the numeric compression method to a human-readable name
  *
  * Method IDs follow the ZIP format conventions used by the rest of the codebase
@@ -1440,7 +1426,6 @@ int main(int argc, char** argv) {
         ctx->verbose = true;
     }
 
-    // emit_zip_stub_warnings(ctx);
     trace_effective_zip_defaults(ctx);
     zu_cli_emit_option_trace(g_tool_name, ctx);
 
