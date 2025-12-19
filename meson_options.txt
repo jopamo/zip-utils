@@ -8,7 +8,7 @@ option(
 option(
   'generate_parity',
   type: 'boolean',
-  value: true,
+  value: false,
   description: 'Regenerate parity test cases from system zip/unzip behavior'
 )
 
