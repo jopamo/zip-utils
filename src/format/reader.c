@@ -1067,6 +1067,7 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
     char* out_path = NULL;
     uint32_t crc = 0;
     uint64_t written = 0;
+    bool skipped = false;
 
     if (path_has_traversal(name)) {
         zu_context_set_error(ctx, ZU_STATUS_USAGE, "unsafe path in archive entry");
@@ -1164,7 +1165,8 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
     if (encrypted) {
         if (!ctx->password) {
             zu_context_set_error(ctx, ZU_STATUS_PASSWORD_REQUIRED, "password required");
-            return ZU_STATUS_PASSWORD_REQUIRED;
+            rc = ZU_STATUS_PASSWORD_REQUIRED;
+            goto cleanup;
         }
 
         zu_zipcrypto_init(&zc, ctx->password);
@@ -1172,7 +1174,8 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
         uint8_t header[12];
         if (fread(header, 1, 12, ctx->in_file) != 12) {
             zu_context_set_error(ctx, ZU_STATUS_IO, "reading encryption header failed");
-            return ZU_STATUS_IO;
+            rc = ZU_STATUS_IO;
+            goto cleanup;
         }
 
         zu_zipcrypto_decrypt(&zc, header, 12);
@@ -1180,12 +1183,14 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
         uint8_t check = (uint8_t)((hdr->flags & 8) ? (hdr->mod_time >> 8) : (hdr->crc32 >> 24));
         if (header[11] != check) {
             zu_context_set_error(ctx, ZU_STATUS_BAD_PASSWORD, "incorrect password");
-            return ZU_STATUS_BAD_PASSWORD;
+            rc = ZU_STATUS_BAD_PASSWORD;
+            goto cleanup;
         }
 
         if (comp_size < 12) {
             zu_context_set_error(ctx, ZU_STATUS_IO, "encrypted entry too small");
-            return ZU_STATUS_IO;
+            rc = ZU_STATUS_IO;
+            goto cleanup;
         }
         comp_size -= 12;
     }
@@ -1194,7 +1199,8 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
     uint8_t* out_buf = zu_get_io_buffer2(ctx, ZU_IO_CHUNK);
     if (!in_buf || !out_buf) {
         zu_context_set_error(ctx, ZU_STATUS_OOM, "allocating buffers failed");
-        return ZU_STATUS_OOM;
+        rc = ZU_STATUS_OOM;
+        goto cleanup;
     }
 
     FILE* fp = NULL;
@@ -1209,13 +1215,14 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
             out_path = build_output_path(ctx, name);
             if (!out_path) {
                 zu_context_set_error(ctx, ZU_STATUS_OOM, "allocating output path failed");
-                return ZU_STATUS_OOM;
+                rc = ZU_STATUS_OOM;
+                goto cleanup;
             }
 
             if (ensure_parent_dirs(out_path) != ZU_STATUS_OK) {
-                free(out_path);
                 zu_context_set_error(ctx, ZU_STATUS_IO, "creating parent directories failed");
-                return ZU_STATUS_IO;
+                rc = ZU_STATUS_IO;
+                goto cleanup;
             }
 
             // Check overwrite policy if file exists
@@ -1223,8 +1230,9 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
             if (lstat(out_path, &st) == 0) {
                 if (ctx->overwrite_policy == ZU_OVERWRITE_NEVER) {
                     // Silently skip
-                    free(out_path);
-                    return ZU_STATUS_OK;
+                    skipped = true;
+                    rc = ZU_STATUS_OK;
+                    goto cleanup;
                 }
 
                 if (ctx->overwrite_policy == ZU_OVERWRITE_PROMPT) {
@@ -1232,9 +1240,9 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
                     FILE* tty = fopen("/dev/tty", "r+");
                     if (!tty) {
                         // If no tty, we must fail in non-interactive per spec
-                        free(out_path);
                         zu_context_set_error(ctx, ZU_STATUS_IO, "file exists (non-interactive)");
-                        return ZU_STATUS_IO;
+                        rc = ZU_STATUS_IO;
+                        goto cleanup;
                     }
 
                     fprintf(tty, "replace %s? [y]es, [n]o, [A]ll, [N]one, [r]ename: ", out_path);
@@ -1312,17 +1320,18 @@ static int extract_or_test_entry(ZContext* ctx, const zu_central_header* hdr, co
                         else {
                             // If user picked 'N', policy is now NEVER
                         }
-                        free(out_path);
-                        return ZU_STATUS_OK;
+                        skipped = true;
+                        rc = ZU_STATUS_OK;
+                        goto cleanup;
                     }
                 }
             }
 
             fp = fopen(out_path, "wb");
             if (!fp) {
-                free(out_path);
                 zu_context_set_error(ctx, ZU_STATUS_IO, "open output file failed");
-                return ZU_STATUS_IO;
+                rc = ZU_STATUS_IO;
+                goto cleanup;
             }
         }
     }
@@ -1556,6 +1565,9 @@ cleanup:
 
     if (rc != ZU_STATUS_OK)
         return rc;
+
+    if (skipped)
+        return ZU_STATUS_OK;
 
     if (written != uncomp_size) {
         zu_context_set_error(ctx, ZU_STATUS_IO, "uncompressed size mismatch");
