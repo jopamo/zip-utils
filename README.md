@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="zip-utils.svg" alt="InfoZIP Utils logo" width="220">
+  <img src=".github/zip-utils.svg" alt="ziputils logo" width="220">
 </p>
 
 # zip-utils
