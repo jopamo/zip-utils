@@ -36,4 +36,4 @@ The binaries `zip`, `unzip`, and `zipinfo` will be available in the `build/` dir
 - **Keep verbose logging**: `build/zip -lf log.txt -li out.zip file1`
 
 ## License
-License information is not yet defined.
+InfoZIP
