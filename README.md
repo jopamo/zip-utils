@@ -11,10 +11,9 @@
 Modern rewrite of Info-ZIP's `zip`, `unzip`, and `zipinfo` with a reentrant core (`libziputils`) and thin CLIs aimed at drop-in compatibility.
 
 ## Features
+- Drop in replacement for zip and unzip packages using system zlib
 - Targets Info-ZIP `zip` 3.0 / `unzip` 6.0 behavior; unsupported flags fail fast instead of silently diverging.
 - Library-first design: CLIs only parse args and populate `ZContext`, leaving core logic in `libziputils`.
-- Consult `zip-spec.md` and `unzip-spec.md` for detailed behavior and option coverage.
-- No support for split archives (returns not-implemented error).
 
 ## Installation / Usage
 
